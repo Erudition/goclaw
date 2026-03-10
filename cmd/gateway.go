@@ -193,58 +193,6 @@ func runGateway() {
 		slog.Info("MCP servers initialized", "configured", len(cfg.Tools.McpServers), "tools", len(mcpMgr.ToolNames()))
 	}
 
-	// Subagent system
-	subagentMgr := setupSubagents(providerRegistry, cfg, msgBus, toolsReg, workspace, sandboxMgr)
-	if subagentMgr != nil {
-		// Wire announce queue for batched subagent result delivery (matching TS debounce pattern)
-		announceQueue := tools.NewAnnounceQueue(1000, 20,
-			func(sessionKey string, items []tools.AnnounceQueueItem, meta tools.AnnounceMetadata) {
-				remainingActive := subagentMgr.CountRunningForParent(meta.ParentAgent)
-				content := tools.FormatBatchedAnnounce(items, remainingActive)
-				senderID := fmt.Sprintf("subagent:batch-%d", len(items))
-				label := items[0].Label
-				if len(items) > 1 {
-					label = fmt.Sprintf("%d tasks", len(items))
-				}
-				batchMeta := map[string]string{
-					"origin_channel":      meta.OriginChannel,
-					"origin_peer_kind":    meta.OriginPeerKind,
-					"parent_agent":        meta.ParentAgent,
-					"subagent_label":      label,
-					"origin_trace_id":     meta.OriginTraceID,
-					"origin_root_span_id": meta.OriginRootSpanID,
-				}
-				if meta.OriginLocalKey != "" {
-					batchMeta["origin_local_key"] = meta.OriginLocalKey
-				}
-				if meta.OriginSessionKey != "" {
-					batchMeta["origin_session_key"] = meta.OriginSessionKey
-				}
-				// Collect media from all items in the batch.
-				var batchMedia []bus.MediaFile
-				for _, item := range items {
-					batchMedia = append(batchMedia, item.Media...)
-				}
-				msgBus.PublishInbound(bus.InboundMessage{
-					Channel:  "system",
-					SenderID: senderID,
-					ChatID:   meta.OriginChatID,
-					Content:  content,
-					UserID:   meta.OriginUserID,
-					Metadata: batchMeta,
-					Media:    batchMedia,
-				})
-			},
-			func(parentID string) int {
-				return subagentMgr.CountRunningForParent(parentID)
-			},
-		)
-		subagentMgr.SetAnnounceQueue(announceQueue)
-
-		toolsReg.Register(tools.NewSpawnTool(subagentMgr, "default", 0))
-		slog.Info("subagent system enabled", "tools", []string{"spawn"})
-	}
-
 	// Exec approval system — always active (deny patterns + safe bins + configurable ask mode)
 	var execApprovalMgr *tools.ExecApprovalManager
 	{
@@ -443,6 +391,58 @@ func runGateway() {
 			loadedNames = append(loadedNames, fmt.Sprintf("%s(%d)", cf.Path, len(cf.Content)))
 		}
 		slog.Info("bootstrap context files", "count", len(contextFiles), "files", loadedNames)
+	}
+
+	// Subagent system
+	subagentMgr := setupSubagents(providerRegistry, cfg, msgBus, toolsReg, workspace, sandboxMgr)
+	if subagentMgr != nil {
+		// Wire announce queue for batched subagent result delivery (matching TS debounce pattern)
+		announceQueue := tools.NewAnnounceQueue(1000, 20,
+			func(sessionKey string, items []tools.AnnounceQueueItem, meta tools.AnnounceMetadata) {
+				remainingActive := subagentMgr.CountRunningForParent(meta.ParentAgent)
+				content := tools.FormatBatchedAnnounce(items, remainingActive)
+				senderID := fmt.Sprintf("subagent:batch-%d", len(items))
+				label := items[0].Label
+				if len(items) > 1 {
+					label = fmt.Sprintf("%d tasks", len(items))
+				}
+				batchMeta := map[string]string{
+					"origin_channel":      meta.OriginChannel,
+					"origin_peer_kind":    meta.OriginPeerKind,
+					"parent_agent":        meta.ParentAgent,
+					"subagent_label":      label,
+					"origin_trace_id":     meta.OriginTraceID,
+					"origin_root_span_id": meta.OriginRootSpanID,
+				}
+				if meta.OriginLocalKey != "" {
+					batchMeta["origin_local_key"] = meta.OriginLocalKey
+				}
+				if meta.OriginSessionKey != "" {
+					batchMeta["origin_session_key"] = meta.OriginSessionKey
+				}
+				// Collect media from all items in the batch.
+				var batchMedia []bus.MediaFile
+				for _, item := range items {
+					batchMedia = append(batchMedia, item.Media...)
+				}
+				msgBus.PublishInbound(bus.InboundMessage{
+					Channel:  "system",
+					SenderID: senderID,
+					ChatID:   meta.OriginChatID,
+					Content:  content,
+					UserID:   meta.OriginUserID,
+					Metadata: batchMeta,
+					Media:    batchMedia,
+				})
+			},
+			func(parentID string) int {
+				return subagentMgr.CountRunningForParent(parentID)
+			},
+		)
+		subagentMgr.SetAnnounceQueue(announceQueue)
+
+		toolsReg.Register(tools.NewSpawnTool(subagentMgr, "default", 0))
+		slog.Info("subagent system enabled", "tools", []string{"spawn"})
 	}
 
 	// Skills loader + search tool
