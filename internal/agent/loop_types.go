@@ -85,6 +85,7 @@ type Loop struct {
 
 	// Sandbox info
 	sandboxEnabled         bool
+	sandboxNetworkEnabled bool
 	sandboxContainerDir    string
 	sandboxWorkspaceAccess string
 
@@ -183,6 +184,7 @@ type LoopConfig struct {
 
 	// Sandbox info (injected into system prompt)
 	SandboxEnabled         bool
+	SandboxNetworkEnabled bool
 	SandboxContainerDir    string // e.g. "/workspace"
 	SandboxWorkspaceAccess string // "none", "ro", "rw"
 
@@ -283,6 +285,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		compactionCfg:          cfg.CompactionCfg,
 		contextPruningCfg:      cfg.ContextPruningCfg,
 		sandboxEnabled:         cfg.SandboxEnabled,
+		sandboxNetworkEnabled:  cfg.SandboxNetworkEnabled,
 		sandboxContainerDir:    cfg.SandboxContainerDir,
 		sandboxWorkspaceAccess: cfg.SandboxWorkspaceAccess,
 		traceCollector:         cfg.TraceCollector,

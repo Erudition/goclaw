@@ -100,6 +100,7 @@ func wireExtras(
 
 	// 4. Compute global sandbox defaults for resolver
 	sandboxEnabled := sandboxMgr != nil
+	sandboxNetworkEnabled := false
 	sandboxContainerDir := ""
 	sandboxWorkspaceAccess := ""
 	if sandboxEnabled {
@@ -108,6 +109,7 @@ func wireExtras(
 			resolved := sbCfg.ToSandboxConfig()
 			sandboxContainerDir = resolved.ContainerWorkdir()
 			sandboxWorkspaceAccess = string(resolved.WorkspaceAccess)
+			sandboxNetworkEnabled = resolved.NetworkEnabled
 		}
 	}
 
@@ -142,6 +144,7 @@ func wireExtras(
 		CompactionCfg:          appCfg.Agents.Defaults.Compaction,
 		ContextPruningCfg:      appCfg.Agents.Defaults.ContextPruning,
 		SandboxEnabled:         sandboxEnabled,
+		SandboxNetworkEnabled:  sandboxNetworkEnabled,
 		SandboxContainerDir:    sandboxContainerDir,
 		SandboxWorkspaceAccess: sandboxWorkspaceAccess,
 		DynamicLoader:          dynamicLoader,

@@ -26,6 +26,7 @@ const (
 	ctxWorkspace   toolContextKey = "tool_workspace"
 	ctxAgentKey    toolContextKey = "tool_agent_key"
 	ctxSessionKey  toolContextKey = "tool_session_key" // origin session key for announce routing
+	ctxSandboxNetwork toolContextKey = "tool_sandbox_network"
 )
 
 func WithToolChannel(ctx context.Context, channel string) context.Context {
@@ -132,6 +133,40 @@ func WithToolSessionKey(ctx context.Context, key string) context.Context {
 
 func ToolSessionKeyFromCtx(ctx context.Context) string {
 	v, _ := ctx.Value(ctxSessionKey).(string)
+	return v
+}
+
+func WithToolSandboxNetwork(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, ctxSandboxNetwork, enabled)
+}
+
+func ToolSandboxNetworkFromCtx(ctx context.Context) bool {
+	v, _ := ctx.Value(ctxSandboxNetwork).(bool)
+	return v
+}
+
+// --- Vision / ImageGen config (per-agent overrides) ---
+
+const (
+	ctxVisionConfig   toolContextKey = "tool_vision_config"
+	ctxImageGenConfig toolContextKey = "tool_imagegen_config"
+)
+
+func WithVisionConfig(ctx context.Context, cfg *config.VisionConfig) context.Context {
+	return context.WithValue(ctx, ctxVisionConfig, cfg)
+}
+
+func VisionConfigFromCtx(ctx context.Context) *config.VisionConfig {
+	v, _ := ctx.Value(ctxVisionConfig).(*config.VisionConfig)
+	return v
+}
+
+func WithImageGenConfig(ctx context.Context, cfg *config.ImageGenConfig) context.Context {
+	return context.WithValue(ctx, ctxImageGenConfig, cfg)
+}
+
+func ImageGenConfigFromCtx(ctx context.Context) *config.ImageGenConfig {
+	v, _ := ctx.Value(ctxImageGenConfig).(*config.ImageGenConfig)
 	return v
 }
 

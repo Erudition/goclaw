@@ -211,6 +211,9 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 	}
 
 	// Check for dangerous commands (applies to both host and sandbox)
+	sandboxKey := ToolSandboxKeyFromCtx(ctx)
+	sandboxNetwork := ToolSandboxNetworkFromCtx(ctx)
+
 	for _, pattern := range t.denyPatterns {
 		if pattern.MatchString(command) {
 			// Check if any exemption applies (e.g. skills-store within .goclaw)
@@ -221,6 +224,15 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 					break
 				}
 			}
+
+			// Sandbox network relaxation: allow DNS tools if networking is enabled in sandbox.
+			// These are still blocked on host.
+			if !exempt && sandboxKey != "" && sandboxNetwork {
+				if pattern.String() == `\b(nslookup|dig|host)\b` {
+					exempt = true
+				}
+			}
+
 			if !exempt {
 				return ErrorResult(fmt.Sprintf("command denied by safety policy: matches pattern %s", pattern.String()))
 			}

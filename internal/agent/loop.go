@@ -55,6 +55,7 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 	// Inject sandbox container directory for path mapping in tools
 	if l.sandboxContainerDir != "" {
 		ctx = tools.WithToolSandboxDir(ctx, l.sandboxContainerDir)
+		ctx = tools.WithToolSandboxNetwork(ctx, l.sandboxNetworkEnabled)
 	}
 	// Inject original sender ID for group file writer permission checks
 	if req.SenderID != "" {
