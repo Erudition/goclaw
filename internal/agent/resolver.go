@@ -460,4 +460,3 @@ func MigrateLegacyPath(path, globalWorkspace string) string {
 	}
 	return path
 }
-
