@@ -273,7 +273,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 	}
 
 	// Sandbox routing (sandboxKey from ctx — thread-safe)
-	sandboxKey := ToolSandboxKeyFromCtx(ctx)
+	sandboxKey = ToolSandboxKeyFromCtx(ctx)
 	if t.sandboxMgr != nil && sandboxKey != "" {
 		return t.executeInSandbox(ctx, command, cwd, sandboxKey)
 	}
