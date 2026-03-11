@@ -51,6 +51,9 @@ type ResolverDeps struct {
 	SandboxContainerDir    string
 	SandboxWorkspaceAccess string
 
+	// Global default workspace
+	GlobalWorkspace string
+
 	// Dynamic custom tools
 	DynamicLoader *tools.DynamicToolLoader
 
@@ -259,6 +262,11 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			if !filepath.IsAbs(workspace) {
 				workspace, _ = filepath.Abs(workspace)
 			}
+		} else if deps.GlobalWorkspace != "" {
+			workspace = filepath.Join(deps.GlobalWorkspace, ag.AgentKey+"-workspace")
+		}
+
+		if workspace != "" {
 			if err := os.MkdirAll(workspace, 0755); err != nil {
 				slog.Warn("failed to create agent workspace directory", "workspace", workspace, "agent", agentKey, "error", err)
 			}
