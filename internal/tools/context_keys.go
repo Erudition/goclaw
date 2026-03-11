@@ -145,8 +145,6 @@ func ToolSandboxNetworkFromCtx(ctx context.Context) bool {
 	return v
 }
 
-
-
 // --- Builtin tool settings (global DB overrides) ---
 
 const ctxBuiltinToolSettings toolContextKey = "tool_builtin_settings"
