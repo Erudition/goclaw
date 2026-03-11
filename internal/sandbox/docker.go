@@ -241,8 +241,20 @@ func (m *DockerManager) Get(ctx context.Context, key string, workspace string, c
 		return nil, ErrSandboxDisabled
 	}
 
+	// Apply per-request network override from context.
+	if netOverride, ok := NetworkOverrideFromCtx(ctx); ok {
+		cfg.NetworkEnabled = netOverride
+	}
+
+	// Include network mode in the cache key so that agents with
+	// networking enabled get a different container from those without.
+	effectiveKey := key
+	if cfg.NetworkEnabled {
+		effectiveKey = key + "-net"
+	}
+
 	m.mu.RLock()
-	if sb, ok := m.sandboxes[key]; ok {
+	if sb, ok := m.sandboxes[effectiveKey]; ok {
 		m.mu.RUnlock()
 		return sb, nil
 	}
@@ -252,7 +264,7 @@ func (m *DockerManager) Get(ctx context.Context, key string, workspace string, c
 	defer m.mu.Unlock()
 
 	// Double-check
-	if sb, ok := m.sandboxes[key]; ok {
+	if sb, ok := m.sandboxes[effectiveKey]; ok {
 		return sb, nil
 	}
 
@@ -260,13 +272,13 @@ func (m *DockerManager) Get(ctx context.Context, key string, workspace string, c
 	if prefix == "" {
 		prefix = "goclaw-sbx-"
 	}
-	name := prefix + sanitizeKey(key)
+	name := prefix + sanitizeKey(effectiveKey)
 	sb, err := newDockerSandbox(ctx, name, cfg, workspace)
 	if err != nil {
 		return nil, err
 	}
 
-	m.sandboxes[key] = sb
+	m.sandboxes[effectiveKey] = sb
 	return sb, nil
 }
 

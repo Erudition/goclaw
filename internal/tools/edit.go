@@ -209,6 +209,9 @@ func (t *EditTool) executeInSandbox(ctx context.Context, path, oldStr, newStr st
 		containerPath = filepath.Join(containerCwd, path)
 	}
 
+	if netEnabled := ToolSandboxNetworkFromCtx(ctx); netEnabled {
+		ctx = sandbox.WithNetworkOverride(ctx, true)
+	}
 	sb, err := t.sandboxMgr.Get(ctx, sandboxKey, t.workspace, SandboxConfigFromCtx(ctx))
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("sandbox error: %v", err))

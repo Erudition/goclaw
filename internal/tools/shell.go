@@ -326,6 +326,10 @@ func (t *ExecTool) executeOnHost(ctx context.Context, command, cwd string) *Resu
 
 // executeInSandbox routes a command through a Docker sandbox container.
 func (t *ExecTool) executeInSandbox(ctx context.Context, command, cwd, sandboxKey string) *Result {
+	// Propagate per-agent network setting to the sandbox manager.
+	if netEnabled := ToolSandboxNetworkFromCtx(ctx); netEnabled {
+		ctx = sandbox.WithNetworkOverride(ctx, true)
+	}
 	sb, err := t.sandboxMgr.Get(ctx, sandboxKey, t.workingDir, SandboxConfigFromCtx(ctx))
 	if err != nil {
 		if errors.Is(err, sandbox.ErrSandboxDisabled) {

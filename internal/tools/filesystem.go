@@ -194,6 +194,9 @@ func (t *ReadFileTool) executeInSandbox(ctx context.Context, path, sandboxKey st
 }
 
 func (t *ReadFileTool) getFsBridge(ctx context.Context, sandboxKey string) (*sandbox.FsBridge, error) {
+	if netEnabled := ToolSandboxNetworkFromCtx(ctx); netEnabled {
+		ctx = sandbox.WithNetworkOverride(ctx, true)
+	}
 	sb, err := t.sandboxMgr.Get(ctx, sandboxKey, t.workspace, SandboxConfigFromCtx(ctx))
 	if err != nil {
 		return nil, err
