@@ -317,11 +317,13 @@ func (c *WSClient) sendResponse(original *wsFrame, headers map[string]string) {
 	respHeaders = append(respHeaders, wsHeader{Key: "biz_rt", Value: "0"})
 
 	respPayload, _ := json.Marshal(map[string]any{
-		"code": 0,
+		"code": http.StatusOK,
 		"msg":  "success",
 	})
 
 	resp := &wsFrame{
+		SeqID:   original.SeqID,
+		LogID:   original.LogID,
 		Method:  frameTypeData,
 		Service: original.Service,
 		Headers: respHeaders,
