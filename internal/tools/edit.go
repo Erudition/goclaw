@@ -20,7 +20,7 @@ type EditTool struct {
 	sandboxMgr       sandbox.Manager
 	contextFileIntc  *ContextFileInterceptor
 	memIntc          *MemoryInterceptor
-	groupWriterCache *store.GroupWriterCache // nil = no group write restriction
+	permStore store.ConfigPermissionStore // nil = no group write restriction
 }
 
 // DenyPaths adds path prefixes that edit must reject.
@@ -36,9 +36,9 @@ func (t *EditTool) SetMemoryInterceptor(intc *MemoryInterceptor) {
 	t.memIntc = intc
 }
 
-// SetGroupWriterCache enables group write permission checks.
-func (t *EditTool) SetGroupWriterCache(c *store.GroupWriterCache) {
-	t.groupWriterCache = c
+// SetConfigPermStore enables group write permission checks.
+func (t *EditTool) SetConfigPermStore(s store.ConfigPermissionStore) {
+	t.permStore = s
 }
 
 func NewEditTool(workspace string, restrict bool) *EditTool {
@@ -62,7 +62,7 @@ func (t *EditTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"path": map[string]any{
 				"type":        "string",
-				"description": "Path to the file to edit",
+				"description": "File path (relative to workspace, or absolute)",
 			},
 			"old_string": map[string]any{
 				"type":        "string",
@@ -98,8 +98,8 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) *Result {
 	}
 
 	// Group write permission check
-	if t.groupWriterCache != nil {
-		if err := store.CheckGroupWritePermission(ctx, t.groupWriterCache); err != nil {
+	if t.permStore != nil {
+		if err := store.CheckFileWriterPermission(ctx, t.permStore); err != nil {
 			return ErrorResult(err.Error())
 		}
 	}
@@ -137,7 +137,7 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) *Result {
 			if result != nil {
 				return result
 			}
-			mwr, err := t.memIntc.WriteFile(ctx, path, newContent)
+			mwr, err := t.memIntc.WriteFile(ctx, path, newContent, false)
 			if err != nil {
 				return ErrorResult(fmt.Sprintf("failed to write memory file: %v", err))
 			}
@@ -160,7 +160,8 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) *Result {
 	if workspace == "" {
 		workspace = t.workspace
 	}
-	resolved, err := resolvePath(path, workspace, effectiveRestrict(ctx, t.restrict))
+	allowed := allowedWithTeamWorkspace(ctx, nil)
+	resolved, err := resolvePathWithAllowed(path, workspace, effectiveRestrict(ctx, t.restrict), allowed)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
@@ -192,39 +193,21 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) *Result {
 }
 
 func (t *EditTool) executeInSandbox(ctx context.Context, path, oldStr, newStr string, replaceAll bool, sandboxKey string) *Result {
-	// Map effective workspace to container path
-	workspace := ToolWorkspaceFromCtx(ctx)
-	if workspace == "" {
-		workspace = t.workspace
-	}
-
-	containerCwd, err := MapHostPathToSandbox(ctx, workspace, t.workspace)
-	if err != nil {
-		return ErrorResult(fmt.Sprintf("sandbox edit: %v", err))
-	}
-
-	// Resolve the requested 'path' relative to the agent's container workdir.
-	containerPath := path
-	if !filepath.IsAbs(path) {
-		containerPath = filepath.Join(containerCwd, path)
-	}
-
-	if netEnabled := ToolSandboxNetworkFromCtx(ctx); netEnabled {
-		ctx = sandbox.WithNetworkOverride(ctx, true)
-	}
 	sb, err := t.sandboxMgr.Get(ctx, sandboxKey, t.workspace, SandboxConfigFromCtx(ctx))
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("sandbox error: %v", err))
 	}
 
-	containerDir := ToolSandboxDirFromCtx(ctx)
-	if containerDir == "" {
-		containerDir = "/workspace" // fallback
+	containerCwd, cwdErr := SandboxCwd(ctx, t.workspace, sandbox.DefaultContainerWorkdir)
+	if cwdErr != nil {
+		return ErrorResult(fmt.Sprintf("sandbox path mapping: %v", cwdErr))
 	}
-	bridge := sandbox.NewFsBridge(sb.ID(), containerDir)
+	containerPath := ResolveSandboxPath(path, containerCwd)
+
+	bridge := sandbox.NewFsBridge(sb.ID(), sandbox.DefaultContainerWorkdir)
 	content, err := bridge.ReadFile(ctx, containerPath)
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("failed to read file: %v", err))
+		return ErrorResult(fmt.Sprintf("failed to read file: %v", err) + MaybeFsBridgeHint(err))
 	}
 
 	newContent, result := applyEdit(content, oldStr, newStr, replaceAll)
@@ -233,7 +216,7 @@ func (t *EditTool) executeInSandbox(ctx context.Context, path, oldStr, newStr st
 	}
 
 	if err := bridge.WriteFile(ctx, containerPath, newContent); err != nil {
-		return ErrorResult(fmt.Sprintf("failed to write file: %v", err))
+		return ErrorResult(fmt.Sprintf("failed to write file: %v", err) + MaybeFsBridgeHint(err))
 	}
 
 	count := strings.Count(content, oldStr)

@@ -23,6 +23,7 @@ import type { AgentData } from "@/types/agent";
 import { slugify, isValidSlug } from "@/lib/slug";
 import { credentialsSchema, configSchema, wizardConfig, type FieldDef } from "./channel-schemas";
 import { ChannelFields } from "./channel-fields";
+import { ChannelScopesInfo } from "./channel-scopes-info";
 import { wizardAuthSteps, wizardConfigSteps, wizardEditConfigs } from "./channel-wizard-registry";
 import { TelegramGroupOverrides } from "./telegram-group-overrides";
 import { CHANNEL_TYPES } from "@/constants/channels";
@@ -260,7 +261,7 @@ export function ChannelInstanceFormDialog({
         {/* === FORM STEP === */}
         {step === "form" && (
           <>
-            <div className="grid gap-4 py-2 px-0.5 -mx-0.5 overflow-y-auto min-h-0">
+            <div className="grid gap-4 py-2 -mx-4 px-4 sm:-mx-6 sm:px-6 overflow-y-auto min-h-0">
               <div className="grid gap-1.5">
                 <Label htmlFor="ci-name">{t("form.key")}</Label>
                 <Input id="ci-name" value={name} onChange={(e) => setName(slugify(e.target.value))} placeholder={t("form.keyPlaceholder")} disabled={!!instance} />
@@ -302,10 +303,12 @@ export function ChannelInstanceFormDialog({
                     {t("form.credentials")}
                     {instance && <span className="text-xs font-normal text-muted-foreground ml-1">{t("form.credentialsHint")}</span>}
                   </legend>
-                  <ChannelFields fields={credsFields} values={credsValues} onChange={handleCredsChange} idPrefix="ci-cred" isEdit={!!instance} />
+                  <ChannelFields fields={credsFields} values={credsValues} onChange={handleCredsChange} idPrefix="ci-cred" isEdit={!!instance} contextValues={configValues} />
                   <p className="text-xs text-muted-foreground">{t("form.credentialsEncrypted")}</p>
                 </fieldset>
               )}
+
+              <ChannelScopesInfo channelType={channelType} />
 
               {/* Auth status indicator (edit mode, channels with auth wizard step) */}
               {instance && wizard?.steps.includes("auth") && (
@@ -327,7 +330,7 @@ export function ChannelInstanceFormDialog({
               {/* Wizard info banner (create mode) */}
               {hasWizard && wizard?.formBanner && (
                 <div className="rounded-md border border-blue-200 bg-blue-50 dark:border-blue-900 dark:bg-blue-950 p-3">
-                  <p className="text-sm text-muted-foreground">{wizard.formBanner}</p>
+                  <p className="text-sm text-muted-foreground">{t(wizard.formBanner)}</p>
                 </div>
               )}
 
@@ -362,7 +365,7 @@ export function ChannelInstanceFormDialog({
             <DialogFooter>
               <Button variant="outline" onClick={() => onOpenChange(false)} disabled={loading}>{t("form.cancel")}</Button>
               <Button onClick={handleSubmit} disabled={loading}>
-                {loading ? t("form.saving") : instance ? t("form.update") : (wizard?.createLabel ?? t("form.create"))}
+                {loading ? t("form.saving") : instance ? t("form.update") : (wizard?.createLabel ? t(wizard.createLabel) : t("form.create"))}
               </Button>
             </DialogFooter>
           </>
@@ -380,7 +383,7 @@ export function ChannelInstanceFormDialog({
         {/* === CONFIG STEP (rendered by registered component) === */}
         {step === "config" && createdInstanceId && ConfigStep && (
           <>
-            <div className="py-2 px-0.5 -mx-0.5 overflow-y-auto min-h-0">
+            <div className="py-2 -mx-4 px-4 sm:-mx-6 sm:px-6 overflow-y-auto min-h-0">
               <ConfigStep
                 instanceId={createdInstanceId}
                 authCompleted={authCompleted}

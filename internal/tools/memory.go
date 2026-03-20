@@ -14,6 +14,7 @@ import (
 // MemorySearchTool implements the memory_search tool for hybrid semantic + FTS search.
 type MemorySearchTool struct {
 	memStore store.MemoryStore // Postgres-backed
+	hasKG    bool              // knowledge_graph_search tool is available
 }
 
 func NewMemorySearchTool() *MemorySearchTool {
@@ -23,6 +24,11 @@ func NewMemorySearchTool() *MemorySearchTool {
 // SetMemoryStore enables Postgres queries with agentID/userID scoping.
 func (t *MemorySearchTool) SetMemoryStore(ms store.MemoryStore) {
 	t.memStore = ms
+}
+
+// SetHasKG enables the KG hint in search results.
+func (t *MemorySearchTool) SetHasKG(has bool) {
+	t.hasKG = has
 }
 
 func (t *MemorySearchTool) Name() string { return "memory_search" }
@@ -72,7 +78,7 @@ func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]any) *Re
 		return ErrorResult("memory system not available")
 	}
 
-	userID := store.UserIDFromContext(ctx)
+	userID := store.MemoryUserID(ctx)
 	searchOpts := store.MemorySearchOptions{
 		MaxResults: maxResults,
 		MinScore:   minScore,
@@ -100,10 +106,14 @@ func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]any) *Re
 		return NewResult("No memory results found for query: " + query)
 	}
 
-	data, _ := json.MarshalIndent(map[string]any{
+	output := map[string]any{
 		"results": results,
 		"count":   len(results),
-	}, "", "  ")
+	}
+	if t.hasKG {
+		output["hint"] = "Also run knowledge_graph_search if the query involves people, teams, projects, or connections between entities."
+	}
+	data, _ := json.MarshalIndent(output, "", "  ")
 	return NewResult(string(data))
 }
 
@@ -167,7 +177,7 @@ func (t *MemoryGetTool) Execute(ctx context.Context, args map[string]any) *Resul
 		return ErrorResult("memory system not available")
 	}
 
-	userID := store.UserIDFromContext(ctx)
+	userID := store.MemoryUserID(ctx)
 
 	// Try per-user first, then global
 	content, err := t.memStore.GetDocument(ctx, agentID.String(), userID, path)

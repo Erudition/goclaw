@@ -28,7 +28,7 @@ func (t *KnowledgeGraphSearchTool) SetKGStore(ks store.KnowledgeGraphStore) {
 func (t *KnowledgeGraphSearchTool) Name() string { return "knowledge_graph_search" }
 
 func (t *KnowledgeGraphSearchTool) Description() string {
-	return "Search the knowledge graph for entities and their relationships. Use specific names or keywords (e.g. a person's name, project name) — not generic words like 'entities' or 'all'. Use query='*' to list all entities. Supports graph traversal via entity_id to discover multi-hop relationships."
+	return "Search the knowledge graph to find people, projects, organizations, and how they connect. Better than memory_search when you need: who works with whom, what projects someone is involved in, dependencies between tasks, or any multi-hop relationship question. Use specific names (e.g. 'Minh', 'GoClaw') — not generic words. Use query='*' to list all known entities. Use entity_id to traverse connections from a specific entity."
 }
 
 func (t *KnowledgeGraphSearchTool) Parameters() map[string]any {
@@ -65,7 +65,7 @@ func (t *KnowledgeGraphSearchTool) Execute(ctx context.Context, args map[string]
 	if agentID == uuid.Nil {
 		return ErrorResult("agent context not available")
 	}
-	userID := store.UserIDFromContext(ctx)
+	userID := store.MemoryUserID(ctx)
 
 	query, _ := args["query"].(string)
 	if query == "" {

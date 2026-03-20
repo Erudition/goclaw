@@ -132,14 +132,40 @@ export const Methods = {
   TEAMS_GET: "teams.get",
   TEAMS_DELETE: "teams.delete",
   TEAMS_TASK_LIST: "teams.tasks.list",
+  TEAMS_TASK_GET: "teams.tasks.get",
+  TEAMS_TASK_GET_LIGHT: "teams.tasks.get-light",
+  TEAMS_TASK_APPROVE: "teams.tasks.approve",
+  TEAMS_TASK_REJECT: "teams.tasks.reject",
+  TEAMS_TASK_COMMENT: "teams.tasks.comment",
+  TEAMS_TASK_COMMENTS: "teams.tasks.comments",
+  TEAMS_TASK_EVENTS: "teams.tasks.events",
+  TEAMS_TASK_CREATE: "teams.tasks.create",
+  TEAMS_TASK_DELETE: "teams.tasks.delete",
+  TEAMS_TASK_DELETE_BULK: "teams.tasks.delete-bulk",
+  TEAMS_TASK_ASSIGN: "teams.tasks.assign",
   TEAMS_MEMBERS_ADD: "teams.members.add",
   TEAMS_MEMBERS_REMOVE: "teams.members.remove",
   TEAMS_UPDATE: "teams.update",
   TEAMS_KNOWN_USERS: "teams.known_users",
+  TEAMS_SCOPES: "teams.scopes",
+  TEAMS_WORKSPACE_LIST: "teams.workspace.list",
+  TEAMS_WORKSPACE_READ: "teams.workspace.read",
+  TEAMS_WORKSPACE_DELETE: "teams.workspace.delete",
 
-  // Delegation history
-  DELEGATIONS_LIST: "delegations.list",
-  DELEGATIONS_GET: "delegations.get",
+  // Heartbeat
+  HEARTBEAT_GET: "heartbeat.get",
+  HEARTBEAT_SET: "heartbeat.set",
+  HEARTBEAT_TOGGLE: "heartbeat.toggle",
+  HEARTBEAT_TEST: "heartbeat.test",
+  HEARTBEAT_LOGS: "heartbeat.logs",
+  HEARTBEAT_CHECKLIST_GET: "heartbeat.checklist.get",
+  HEARTBEAT_CHECKLIST_SET: "heartbeat.checklist.set",
+  HEARTBEAT_TARGETS: "heartbeat.targets",
+
+  // Config permissions
+  CONFIG_PERMISSIONS_LIST: "config.permissions.list",
+  CONFIG_PERMISSIONS_GRANT: "config.permissions.grant",
+  CONFIG_PERMISSIONS_REVOKE: "config.permissions.revoke",
 
   // Phase 3+ - NICE TO HAVE
   LOGS_TAIL: "logs.tail",
@@ -164,23 +190,21 @@ export const Events = {
   VOICEWAKE_CHANGED: "voicewake.changed",
   CONNECT_CHALLENGE: "connect.challenge",
   TALK_MODE: "talk.mode",
-  HANDOFF: "handoff",
-
-  // Delegation lifecycle
-  DELEGATION_STARTED: "delegation.started",
-  DELEGATION_COMPLETED: "delegation.completed",
-  DELEGATION_FAILED: "delegation.failed",
-  DELEGATION_CANCELLED: "delegation.cancelled",
-  DELEGATION_PROGRESS: "delegation.progress",
-  DELEGATION_ACCUMULATED: "delegation.accumulated",
-  DELEGATION_ANNOUNCE: "delegation.announce",
-  DELEGATION_QUALITY_GATE_RETRY: "delegation.quality_gate.retry",
 
   // Team tasks
   TEAM_TASK_CREATED: "team.task.created",
   TEAM_TASK_CLAIMED: "team.task.claimed",
   TEAM_TASK_COMPLETED: "team.task.completed",
   TEAM_TASK_CANCELLED: "team.task.cancelled",
+  TEAM_TASK_FAILED: "team.task.failed",
+  TEAM_TASK_REVIEWED: "team.task.reviewed",
+  TEAM_TASK_APPROVED: "team.task.approved",
+  TEAM_TASK_REJECTED: "team.task.rejected",
+  TEAM_TASK_PROGRESS: "team.task.progress",
+  TEAM_TASK_COMMENTED: "team.task.commented",
+  TEAM_TASK_ASSIGNED: "team.task.assigned",
+  TEAM_TASK_DISPATCHED: "team.task.dispatched",
+  TEAM_TASK_DELETED: "team.task.deleted",
 
   // Team messages
   TEAM_MESSAGE_SENT: "team.message.sent",
@@ -192,29 +216,45 @@ export const Events = {
   TEAM_MEMBER_ADDED: "team.member.added",
   TEAM_MEMBER_REMOVED: "team.member.removed",
 
+  // Workspace
+  WORKSPACE_FILE_CHANGED: "workspace.file.changed",
+
   // Agent links
   AGENT_LINK_CREATED: "agent_link.created",
   AGENT_LINK_UPDATED: "agent_link.updated",
   AGENT_LINK_DELETED: "agent_link.deleted",
 
+  // Session lifecycle
+  SESSION_UPDATED: "session.updated",
+
   // Trace lifecycle
   TRACE_UPDATED: "trace.updated",
+
+  // Skill dependency check (realtime progress during startup/rescan)
+  SKILL_DEPS_CHECKED: "skill.deps.checked",
+  SKILL_DEPS_COMPLETE: "skill.deps.complete",
+
+  // Skill dependency install (triggered by POST /v1/skills/install-deps)
+  SKILL_DEPS_INSTALLING: "skill.deps.installing",
+  SKILL_DEPS_INSTALLED: "skill.deps.installed",
+
+  HEARTBEAT: "heartbeat",
 } as const;
 
 /** All event names relevant to team debug view */
 export const TEAM_RELATED_EVENTS: Set<string> = new Set([
-  Events.DELEGATION_STARTED, Events.DELEGATION_COMPLETED,
-  Events.DELEGATION_FAILED, Events.DELEGATION_CANCELLED,
-  Events.DELEGATION_PROGRESS, Events.DELEGATION_ACCUMULATED,
-  Events.DELEGATION_ANNOUNCE, Events.DELEGATION_QUALITY_GATE_RETRY,
   Events.TEAM_TASK_CREATED, Events.TEAM_TASK_CLAIMED,
   Events.TEAM_TASK_COMPLETED, Events.TEAM_TASK_CANCELLED,
+  Events.TEAM_TASK_REVIEWED, Events.TEAM_TASK_APPROVED,
+  Events.TEAM_TASK_REJECTED, Events.TEAM_TASK_PROGRESS,
+  Events.TEAM_TASK_COMMENTED, Events.TEAM_TASK_ASSIGNED, Events.TEAM_TASK_DISPATCHED, Events.TEAM_TASK_DELETED,
   Events.TEAM_MESSAGE_SENT,
   Events.TEAM_CREATED, Events.TEAM_UPDATED, Events.TEAM_DELETED,
   Events.TEAM_MEMBER_ADDED, Events.TEAM_MEMBER_REMOVED,
   Events.AGENT_LINK_CREATED, Events.AGENT_LINK_UPDATED,
   Events.AGENT_LINK_DELETED,
   Events.AGENT,
+  Events.WORKSPACE_FILE_CHANGED,
 ]);
 
 // Agent event subtypes (in payload.type)

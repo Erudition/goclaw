@@ -25,6 +25,8 @@ import { slugify, isValidSlug } from "@/lib/slug";
 import { PROVIDER_TYPES } from "@/constants/providers";
 import { OAuthSection } from "./provider-oauth-section";
 import { CLISection } from "./provider-cli-section";
+import { ACPSection } from "./provider-acp-section";
+import { Loader2 } from "lucide-react";
 
 interface ProviderFormDialogProps {
   open: boolean;
@@ -47,11 +49,19 @@ export function ProviderFormDialog({ open, onOpenChange, provider, onSubmit, exi
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  // ACP fields
+  const [acpBinary, setAcpBinary] = useState("");
+  const [acpArgs, setAcpArgs] = useState("");
+  const [acpIdleTTL, setAcpIdleTTL] = useState("");
+  const [acpPermMode, setAcpPermMode] = useState("approve-all");
+  const [acpWorkDir, setAcpWorkDir] = useState("");
+
   // Only one Claude CLI provider allowed per instance
   const hasClaudeCLI = !isEdit && existingProviders.some((p) => p.provider_type === "claude_cli");
 
   const isOAuth = providerType === "chatgpt_oauth";
   const isCLI = providerType === "claude_cli";
+  const isACP = providerType === "acp";
 
   useEffect(() => {
     if (open) {
@@ -63,6 +73,15 @@ export function ProviderFormDialog({ open, onOpenChange, provider, onSubmit, exi
         setApiBase(provider.api_base || "");
         setApiKey(provider.api_key || "");
         setEnabled(provider.enabled);
+        // Load ACP settings from provider
+        if (provider.provider_type === "acp") {
+          const s = provider.settings as Record<string, unknown> | undefined;
+          setAcpBinary(provider.api_base || "");
+          setAcpArgs(Array.isArray(s?.args) ? (s.args as string[]).join(" ") : "");
+          setAcpIdleTTL((s?.idle_ttl as string) || "");
+          setAcpPermMode((s?.perm_mode as string) || "approve-all");
+          setAcpWorkDir((s?.work_dir as string) || "");
+        }
       } else {
         setName("");
         setDisplayName("");
@@ -70,6 +89,11 @@ export function ProviderFormDialog({ open, onOpenChange, provider, onSubmit, exi
         setApiBase("");
         setApiKey("");
         setEnabled(true);
+        setAcpBinary("");
+        setAcpArgs("");
+        setAcpIdleTTL("");
+        setAcpPermMode("approve-all");
+        setAcpWorkDir("");
       }
     }
   }, [open, provider]);
@@ -85,6 +109,21 @@ export function ProviderFormDialog({ open, onOpenChange, provider, onSubmit, exi
         api_base: apiBase.trim() || undefined,
         enabled,
       };
+
+      // ACP: serialize fields into api_base (binary) + settings JSON
+      if (isACP) {
+        data.api_base = acpBinary.trim() || undefined;
+        const settings: Record<string, unknown> = {};
+        if (acpArgs.trim()) {
+          settings.args = acpArgs.trim().split(/\s+/);
+        }
+        if (acpIdleTTL.trim()) settings.idle_ttl = acpIdleTTL.trim();
+        if (acpPermMode) settings.perm_mode = acpPermMode;
+        if (acpWorkDir.trim()) settings.work_dir = acpWorkDir.trim();
+        if (Object.keys(settings).length > 0) {
+          data.settings = settings;
+        }
+      }
 
       // Only include api_key if it's a real value (not the mask)
       if (apiKey && apiKey !== "***") {
@@ -107,7 +146,7 @@ export function ProviderFormDialog({ open, onOpenChange, provider, onSubmit, exi
           <DialogTitle>{isEdit ? t("form.editTitle") : t("form.createTitle")}</DialogTitle>
           <DialogDescription>{t("form.configure")}</DialogDescription>
         </DialogHeader>
-        <div className="space-y-4 py-4 px-0.5 -mx-0.5 overflow-y-auto min-h-0">
+        <div className="space-y-4 py-4 -mx-4 px-4 sm:-mx-6 sm:px-6 overflow-y-auto min-h-0">
           {/* Provider type selector — always shown in create mode */}
           {!isEdit && (
             <ProviderTypeSelect
@@ -190,8 +229,24 @@ export function ProviderFormDialog({ open, onOpenChange, provider, onSubmit, exi
               {/* Claude CLI section */}
               {isCLI && <CLISection open={open} />}
 
-              {/* Standard provider fields (not shown for Claude CLI) */}
-              {!isCLI && (
+              {/* ACP section */}
+              {isACP && (
+                <ACPSection
+                  binary={acpBinary}
+                  onBinaryChange={setAcpBinary}
+                  args={acpArgs}
+                  onArgsChange={setAcpArgs}
+                  idleTTL={acpIdleTTL}
+                  onIdleTTLChange={setAcpIdleTTL}
+                  permMode={acpPermMode}
+                  onPermModeChange={setAcpPermMode}
+                  workDir={acpWorkDir}
+                  onWorkDirChange={setAcpWorkDir}
+                />
+              )}
+
+              {/* Standard provider fields (not shown for Claude CLI or ACP) */}
+              {!isCLI && !isACP && (
                 <>
                   <div className="space-y-2">
                     <Label htmlFor="apiBase">{t("form.apiBase")}</Label>
@@ -239,7 +294,9 @@ export function ProviderFormDialog({ open, onOpenChange, provider, onSubmit, exi
             <Button
               onClick={handleSubmit}
               disabled={!name.trim() || !isValidSlug(name) || !providerType || loading}
+              className="gap-1"
             >
+              {loading && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
               {loading
                 ? (isEdit ? t("form.saving") : t("form.creating"))
                 : isEdit ? t("form.save") : t("form.create")}

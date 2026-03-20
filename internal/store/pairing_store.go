@@ -28,7 +28,7 @@ type PairingStore interface {
 	ApprovePairing(code, approvedBy string) (*PairedDeviceData, error)
 	DenyPairing(code string) error
 	RevokePairing(senderID, channel string) error
-	IsPaired(senderID, channel string) bool
+	IsPaired(senderID, channel string) (bool, error)
 	ListPending() []PairingRequestData
 	ListPaired() []PairedDeviceData
 }

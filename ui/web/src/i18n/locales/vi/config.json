@@ -57,10 +57,10 @@
   "agents.maxToolIterationsTip": "Số lần lặp gọi công cụ tối đa cho mỗi yêu cầu agent.",
   "agents.contextWindow": "Cửa sổ ngữ cảnh",
   "agents.contextWindowTip": "Tổng ngân sách token cho cửa sổ ngữ cảnh model.",
-  "agents.workspace": "Đường dẫn không gian làm việc",
+  "agents.workspace": "Đường dẫn workspace",
   "agents.workspaceTip": "Thư mục gốc cho các thao tác tệp của agent. Thư mục con theo người dùng được tạo tự động.",
-  "agents.restrictToWorkspace": "Giới hạn trong không gian làm việc",
-  "agents.restrictToWorkspaceTip": "Ngăn agent đọc hoặc ghi tệp ngoài đường dẫn không gian làm việc.",
+  "agents.restrictToWorkspace": "Giới hạn trong workspace",
+  "agents.restrictToWorkspaceTip": "Ngăn agent đọc hoặc ghi tệp ngoài đường dẫn workspace.",
   "agents.intentClassify": "Phân loại ý định",
   "agents.saveError": "Lưu mặc định agent thất bại",
 
@@ -282,7 +282,26 @@
   "channels.allowFrom": "Cho phép từ",
   "channels.allowFromPlaceholder": "user_id_1, user_id_2, ...",
   "channels.dmStreaming": "Streaming tin nhắn riêng",
+  "channels.dmStreamingHint": "Cập nhật tin nhắn liên tục trong DM",
   "channels.groupStreaming": "Streaming nhóm",
+  "channels.groupStreamingHint": "Cập nhật tin nhắn liên tục trong nhóm",
+  "channels.streaming": "Streaming",
+  "channels.draftTransport": "Xem trước nháp",
+  "channels.draftTransportHint": "Xem trước streaming trong DM (không thông báo mỗi lần chỉnh sửa)",
+  "channels.reasoningStream": "Hiện suy luận",
+  "channels.reasoningStreamHint": "Hiển thị quá trình suy nghĩ của AI thành tin nhắn riêng",
   "channels.reactionLevel": "Mức phản ứng",
-  "channels.connectionMode": "Chế độ kết nối"
+  "channels.connectionMode": "Chế độ kết nối",
+  "channels.reactionOff": "Tắt",
+  "channels.reactionMinimal": "Tối thiểu",
+  "channels.reactionFull": "Đầy đủ",
+  "channels.connectionWebsocket": "WebSocket",
+  "channels.connectionWebhook": "Webhook",
+
+  "bindings.any": "Bất kỳ",
+
+  "toast": {
+    "saved": "Đã lưu cấu hình",
+    "saveFailed": "Không thể lưu cấu hình"
+  }
 }

@@ -44,9 +44,12 @@ type Loop struct {
 	provider      providers.Provider
 	model         string
 	contextWindow int
+	maxTokens     int // max output tokens per LLM call (0 = default 8192)
 	maxIterations int
 	maxToolCalls  int
-	workspace     string
+	workspace        string
+	dataDir          string // global workspace root for team workspace resolution
+	workspaceSharing *store.WorkspaceSharingConfig
 
 	// Per-agent overrides from DB (nil = use global defaults)
 	restrictToWs  *bool
@@ -89,6 +92,9 @@ type Loop struct {
 	sandboxContainerDir    string
 	sandboxWorkspaceAccess string
 
+	// Shell deny group overrides from agent other_config (nil = all defaults)
+	shellDenyGroups map[string]bool
+
 	// Event callback for broadcasting agent events (run.started, chunk, tool.call, etc.)
 	onEvent func(event AgentEvent)
 
@@ -109,11 +115,19 @@ type Loop struct {
 	// Self-evolve: predefined agents can update SOUL.md through chat
 	selfEvolve bool
 
-	// Group writer cache for system prompt injection
-	groupWriterCache *store.GroupWriterCache
+	// Skill learning loop: when skillEvolve=true, the loop injects nudges reminding
+	// the agent to capture reusable patterns as skills via skill_manage.
+	skillEvolve        bool
+	skillNudgeInterval int // nudge every N tool calls (0 = disabled, 15 = default)
+
+	// Config permission store for group file writer checks
+	configPermStore store.ConfigPermissionStore
 
 	// Team store for cross-session pending task detection
 	teamStore store.TeamStore
+
+	// Secure CLI store for credentialed exec context injection
+	secureCLIStore store.SecureCLIStore
 
 	// Persistent media storage for cross-turn image/document access
 	mediaStore *media.Store
@@ -152,9 +166,12 @@ type LoopConfig struct {
 	Provider        providers.Provider
 	Model           string
 	ContextWindow   int
+	MaxTokens       int // max output tokens per LLM call (0 = default 8192)
 	MaxIterations   int
 	MaxToolCalls    int
-	Workspace       string
+	Workspace        string
+	DataDir          string // global workspace root for team workspace resolution
+	WorkspaceSharing *store.WorkspaceSharingConfig
 
 	// Per-agent DB overrides (nil = use global defaults)
 	RestrictToWs *bool
@@ -188,6 +205,9 @@ type LoopConfig struct {
 	SandboxContainerDir    string // e.g. "/workspace"
 	SandboxWorkspaceAccess string // "none", "ro", "rw"
 
+	// Shell deny group overrides (nil = all defaults)
+	ShellDenyGroups map[string]bool
+
 	// Agent UUID for context propagation to tools
 	AgentUUID uuid.UUID
 	AgentType string // "open" or "predefined"
@@ -214,11 +234,18 @@ type LoopConfig struct {
 	// Self-evolve: predefined agents can update SOUL.md (style/tone) through chat
 	SelfEvolve bool
 
-	// Group writer cache for system prompt injection
-	GroupWriterCache *store.GroupWriterCache
+	// Skill evolution: agent learning loop config (from other_config JSONB)
+	SkillEvolve        bool
+	SkillNudgeInterval int // 0 = disabled, 15 = default
+
+	// Config permission store for group file writer checks
+	ConfigPermStore store.ConfigPermissionStore
 
 	// Team store for cross-session pending task detection
 	TeamStore store.TeamStore
+
+	// Secure CLI store for credentialed exec context injection
+	SecureCLIStore store.SecureCLIStore
 
 	// Persistent media storage for cross-turn image/document access
 	MediaStore *media.Store
@@ -231,12 +258,22 @@ type LoopConfig struct {
 	TracingStore       store.TracingStore
 }
 
+const defaultMaxTokens = config.DefaultMaxTokens
+
+// effectiveMaxTokens returns the configured max output tokens, defaulting to 8192.
+func (l *Loop) effectiveMaxTokens() int {
+	if l.maxTokens > 0 {
+		return l.maxTokens
+	}
+	return defaultMaxTokens
+}
+
 func NewLoop(cfg LoopConfig) *Loop {
 	if cfg.MaxIterations <= 0 {
-		cfg.MaxIterations = 20
+		cfg.MaxIterations = config.DefaultMaxIterations
 	}
 	if cfg.ContextWindow <= 0 {
-		cfg.ContextWindow = 200000
+		cfg.ContextWindow = config.DefaultContextWindow
 	}
 
 	// Normalize injection action (default: "warn")
@@ -261,9 +298,12 @@ func NewLoop(cfg LoopConfig) *Loop {
 		provider:               cfg.Provider,
 		model:                  cfg.Model,
 		contextWindow:          cfg.ContextWindow,
+		maxTokens:              cfg.MaxTokens,
 		maxIterations:          cfg.MaxIterations,
 		maxToolCalls:           cfg.MaxToolCalls,
 		workspace:              cfg.Workspace,
+		dataDir:                cfg.DataDir,
+		workspaceSharing:       cfg.WorkspaceSharing,
 		restrictToWs:           cfg.RestrictToWs,
 		subagentsCfg:           cfg.SubagentsCfg,
 		memoryCfg:              cfg.MemoryCfg,
@@ -288,6 +328,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		sandboxNetworkEnabled:  cfg.SandboxNetworkEnabled,
 		sandboxContainerDir:    cfg.SandboxContainerDir,
 		sandboxWorkspaceAccess: cfg.SandboxWorkspaceAccess,
+		shellDenyGroups:        cfg.ShellDenyGroups,
 		traceCollector:         cfg.TraceCollector,
 		inputGuard:             guard,
 		injectionAction:        action,
@@ -295,8 +336,11 @@ func NewLoop(cfg LoopConfig) *Loop {
 		builtinToolSettings:    cfg.BuiltinToolSettings,
 		thinkingLevel:          cfg.ThinkingLevel,
 		selfEvolve:             cfg.SelfEvolve,
-		groupWriterCache:       cfg.GroupWriterCache,
+		skillEvolve:            cfg.SkillEvolve,
+		skillNudgeInterval:     cfg.SkillNudgeInterval,
+		configPermStore:        cfg.ConfigPermStore,
 		teamStore:              cfg.TeamStore,
+		secureCLIStore:         cfg.SecureCLIStore,
 		mediaStore:             cfg.MediaStore,
 		modelPricing:           cfg.ModelPricing,
 		budgetMonthlyCents:     cfg.BudgetMonthlyCents,
@@ -325,20 +369,35 @@ type RunRequest struct {
 	LocalKey          string          // composite key with topic/thread suffix for routing (e.g. "-100123:topic:42")
 	ParentTraceID     uuid.UUID       // if set, reuse parent trace instead of creating new (announce runs)
 	ParentRootSpanID  uuid.UUID       // if set, nest announce agent span under this parent span
+	LinkedTraceID     uuid.UUID       // if set, create new trace with parent_trace_id pointing to this (team task runs)
 	TraceName         string          // override trace name (default: "chat <agentID>")
 	TraceTags         []string        // additional tags for the trace (e.g. "cron")
 	MaxIterations     int             // per-request override (0 = use agent default, must be lower)
+	ModelOverride     string          // per-request model override (heartbeat uses cheaper model)
+	LightContext      bool            // skip loading context files (only inject ExtraSystemPrompt)
 
 	// Run classification
 	RunKind       string // "delegation", "announce" — empty for user-initiated runs
 	HideInput     bool   // don't persist input message in session history (announce runs)
 	ContentSuffix string // appended to assistant response before saving (e.g. image markdown for WS)
 
+	// Mid-run message injection channel (nil = disabled).
+	// When set, the loop drains this channel at turn boundaries to inject
+	// user follow-up messages into the running conversation.
+	InjectCh <-chan InjectedMessage
+
 	// Delegation context (set when running as a delegate agent)
 	DelegationID  string // delegation ID for event correlation
 	TeamID        string // team ID (if delegation is team-scoped)
 	TeamTaskID    string // team task ID (if delegation has an associated task)
 	ParentAgentID string // parent agent key that initiated the delegation
+
+	// Workspace scope propagation (set by delegation, read by workspace tools)
+	WorkspaceChannel string
+	WorkspaceChatID  string
+	// TeamWorkspace overrides the member agent's workspace with the team's workspace
+	// so file operations (read/write/image/audio) use the shared team directory.
+	TeamWorkspace string
 }
 
 // RunResult is the output of a completed agent run.

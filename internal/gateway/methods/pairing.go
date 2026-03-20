@@ -3,6 +3,7 @@ package methods
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
@@ -22,10 +23,11 @@ type PairingMethods struct {
 	msgBus      *bus.MessageBus
 	onApprove   PairingApproveCallback
 	broadcaster func(protocol.EventFrame)
+	rateLimiter *gateway.RateLimiter
 }
 
-func NewPairingMethods(service store.PairingStore, msgBus *bus.MessageBus) *PairingMethods {
-	return &PairingMethods{service: service, msgBus: msgBus}
+func NewPairingMethods(service store.PairingStore, msgBus *bus.MessageBus, rateLimiter *gateway.RateLimiter) *PairingMethods {
+	return &PairingMethods{service: service, msgBus: msgBus, rateLimiter: rateLimiter}
 }
 
 // SetOnApprove sets a callback that fires after a pairing is approved.
@@ -113,6 +115,7 @@ func (m *PairingMethods) handleApprove(ctx context.Context, client *gateway.Clie
 		m.broadcaster(*protocol.NewEvent(protocol.EventDevicePairRes, map[string]any{"action": "approved"}))
 	}
 
+	emitAudit(m.msgBus, client, "pairing.approved", "pairing", params.Code)
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"paired": paired,
 	}))
@@ -141,6 +144,7 @@ func (m *PairingMethods) handleDeny(ctx context.Context, client *gateway.Client,
 		m.broadcaster(*protocol.NewEvent(protocol.EventDevicePairRes, map[string]any{"action": "denied"}))
 	}
 
+	emitAudit(m.msgBus, client, "pairing.denied", "pairing", params.Code)
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"denied": true,
 	}))
@@ -191,6 +195,7 @@ func (m *PairingMethods) handleRevoke(ctx context.Context, client *gateway.Clien
 		})
 	}
 
+	emitAudit(m.msgBus, client, "pairing.revoked", "pairing", params.SenderID)
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"revoked": true,
 	}))
@@ -199,6 +204,11 @@ func (m *PairingMethods) handleRevoke(ctx context.Context, client *gateway.Clien
 // handleBrowserPairingStatus lets a pending browser client check if its pairing code has been approved.
 // Called by unauthenticated clients during the browser pairing flow.
 func (m *PairingMethods) handleBrowserPairingStatus(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	// Rate-limit unauthenticated polling to prevent sender_id enumeration.
+	if m.rateLimiter != nil && m.rateLimiter.Enabled() && !m.rateLimiter.Allow("pairing:"+client.RemoteAddr()) {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrResourceExhausted, "rate limited"))
+		return
+	}
 	locale := store.LocaleFromContext(ctx)
 	var params struct {
 		SenderID string `json:"sender_id"`
@@ -212,7 +222,11 @@ func (m *PairingMethods) handleBrowserPairingStatus(ctx context.Context, client 
 		return
 	}
 
-	if m.service.IsPaired(params.SenderID, "browser") {
+	paired, pairErr := m.service.IsPaired(params.SenderID, "browser")
+	if pairErr != nil {
+		slog.Warn("security.pairing_check_failed", "sender_id", params.SenderID, "error", pairErr)
+	}
+	if paired {
 		client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 			"status": "approved",
 		}))

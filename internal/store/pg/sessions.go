@@ -3,7 +3,9 @@ package pg
 import (
 	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,9 +27,34 @@ type PGSessionStore struct {
 }
 
 func NewPGSessionStore(db *sql.DB) *PGSessionStore {
-	return &PGSessionStore{
+	s := &PGSessionStore{
 		db:    db,
 		cache: make(map[string]*store.SessionData),
+	}
+	s.migrateLegacyWSKeys()
+	return s
+}
+
+// migrateLegacyWSKeys renames old WS session keys from non-canonical format
+// (agent:X:ws-userId-ts) to canonical format (agent:X:ws:direct:ts).
+// The last hyphen-delimited segment is the base36 timestamp used as convId.
+// Idempotent — no-op if no legacy keys exist.
+func (s *PGSessionStore) migrateLegacyWSKeys() {
+	res, err := s.db.Exec(`
+		UPDATE sessions
+		SET session_key = regexp_replace(
+			session_key,
+			'^(agent:[^:]+):ws-.+-([^-]+)$',
+			'\1:ws:direct:\2'
+		)
+		WHERE session_key ~ '^agent:[^:]+:ws-'
+	`)
+	if err != nil {
+		slog.Warn("sessions.migrate_legacy_ws_keys", "error", err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		slog.Info("sessions.migrate_legacy_ws_keys", "migrated", n)
 	}
 }
 
@@ -53,13 +80,22 @@ func (s *PGSessionStore) GetOrCreate(key string) *store.SessionData {
 		Created:  now,
 		Updated:  now,
 	}
+
+	// Extract team_id from team session keys (agent:{agentId}:team:{teamId}:{chatId}).
+	var teamID *uuid.UUID
+	if parts := strings.SplitN(key, ":", 5); len(parts) >= 4 && parts[2] == "team" {
+		if tid, err := uuid.Parse(parts[3]); err == nil {
+			teamID = &tid
+			data.TeamID = teamID
+		}
+	}
 	s.cache[key] = data
 
 	msgsJSON, _ := json.Marshal([]providers.Message{})
 	s.db.Exec(
-		`INSERT INTO sessions (id, session_key, messages, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5) ON CONFLICT (session_key) DO NOTHING`,
-		uuid.Must(uuid.NewV7()), key, msgsJSON, now, now,
+		`INSERT INTO sessions (id, session_key, messages, created_at, updated_at, team_id)
+		 VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (session_key) DO NOTHING`,
+		uuid.Must(uuid.NewV7()), key, msgsJSON, now, now, teamID,
 	)
 
 	return data
@@ -123,6 +159,15 @@ func (s *PGSessionStore) SetSummary(key, summary string) {
 	}
 }
 
+func (s *PGSessionStore) GetLabel(key string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if data, ok := s.cache[key]; ok {
+		return data.Label
+	}
+	return ""
+}
+
 func (s *PGSessionStore) SetLabel(key, label string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -130,6 +175,17 @@ func (s *PGSessionStore) SetLabel(key, label string) {
 		data.Label = label
 		data.Updated = time.Now()
 	}
+}
+
+func (s *PGSessionStore) GetSessionMetadata(key string) map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if data, ok := s.cache[key]; ok && data.Metadata != nil {
+		out := make(map[string]string, len(data.Metadata))
+		maps.Copy(out, data.Metadata)
+		return out
+	}
+	return nil
 }
 
 func (s *PGSessionStore) SetSessionMetadata(key string, metadata map[string]string) {

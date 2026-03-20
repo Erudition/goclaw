@@ -6,6 +6,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"log/slog"
+
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/media"
@@ -22,10 +24,11 @@ type ChatMethods struct {
 	agents      *agent.Router
 	sessions    store.SessionStore
 	rateLimiter *gateway.RateLimiter
+	eventBus    bus.EventPublisher
 }
 
-func NewChatMethods(agents *agent.Router, sess store.SessionStore, rl *gateway.RateLimiter) *ChatMethods {
-	return &ChatMethods{agents: agents, sessions: sess, rateLimiter: rl}
+func NewChatMethods(agents *agent.Router, sess store.SessionStore, rl *gateway.RateLimiter, eventBus bus.EventPublisher) *ChatMethods {
+	return &ChatMethods{agents: agents, sessions: sess, rateLimiter: rl, eventBus: eventBus}
 }
 
 // Register adds chat methods to the router.
@@ -119,18 +122,37 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 	runID := uuid.NewString()
 	sessionKey := params.SessionKey
 	if sessionKey == "" {
-		sessionKey = sessions.SessionKey(params.AgentID, "ws-"+client.ID())
+		sessionKey = sessions.BuildWSSessionKey(params.AgentID, uuid.NewString())
 	}
 
-	// Inject user_id into context for downstream stores/tools
-	runCtxBase := ctx
+	// Detach from HTTP request context so agent runs survive page navigation/reconnect.
+	// WithoutCancel preserves all context values (locale, user ID, etc.)
+	// but HTTP request cancellation no longer propagates.
+	// Explicit abort via chat.abort still works through the per-run cancel().
+	runCtxBase := context.WithoutCancel(ctx)
 	if userID != "" {
 		runCtxBase = store.WithUserID(runCtxBase, userID)
 	}
 
+	// Mid-run injection: if session already has an active run, inject the message
+	// into the running loop instead of starting a new concurrent run.
+	if m.agents.IsSessionBusy(sessionKey) {
+		injected := m.agents.InjectMessage(sessionKey, agent.InjectedMessage{
+			Content: params.Message,
+			UserID:  userID,
+		})
+		if injected {
+			client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
+				"injected": true,
+			}))
+			return
+		}
+		// Fallback: injection failed (channel full), proceed with new run
+	}
+
 	// Create cancellable context for abort support (matching TS AbortController pattern).
 	runCtx, cancel := context.WithCancel(runCtxBase)
-	m.agents.RegisterRun(runID, sessionKey, params.AgentID, cancel)
+	injectCh := m.agents.RegisterRun(runID, sessionKey, params.AgentID, cancel)
 
 	// Run agent asynchronously - events are broadcast via the event system
 	go func() {
@@ -171,10 +193,11 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 			Message:    message,
 			Media:      mediaFiles,
 			Channel:    "ws",
-			ChatID:     client.ID(),
+			ChatID:     userID, // use stable userID for team/workspace isolation (not ephemeral client.ID())
 			RunID:      runID,
 			UserID:     userID,
 			Stream:     params.Stream,
+			InjectCh:   injectCh,
 		})
 
 		if err != nil {
@@ -184,6 +207,28 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 			}
 			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, err.Error()))
 			return
+		}
+
+		// Auto-generate conversation title on first message (label empty = never titled).
+		if label := m.sessions.GetLabel(sessionKey); label == "" {
+			agentProvider := loop.Provider()
+			agentModel := loop.Model()
+			userMsg := params.Message
+			go func() {
+				title := agent.GenerateTitle(context.Background(), agentProvider, agentModel, userMsg)
+				if title == "" {
+					return
+				}
+				m.sessions.SetLabel(sessionKey, title)
+				if err := m.sessions.Save(sessionKey); err != nil {
+					slog.Warn("failed to save session title", "sessionKey", sessionKey, "error", err)
+					return
+				}
+				m.eventBus.Broadcast(bus.Event{
+					Name:    protocol.EventSessionUpdated,
+					Payload: map[string]string{"sessionKey": sessionKey, "label": title},
+				})
+			}()
 		}
 
 		resp := map[string]any{
@@ -217,7 +262,7 @@ func (m *ChatMethods) handleHistory(ctx context.Context, client *gateway.Client,
 
 	sessionKey := params.SessionKey
 	if sessionKey == "" {
-		sessionKey = sessions.SessionKey(params.AgentID, "ws-"+client.ID())
+		sessionKey = sessions.BuildWSSessionKey(params.AgentID, uuid.NewString())
 	}
 
 	history := m.sessions.GetHistory(sessionKey)

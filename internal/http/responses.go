@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
+	"github.com/nextlevelbuilder/goclaw/internal/permissions"
 	"github.com/nextlevelbuilder/goclaw/internal/sessions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -43,9 +44,14 @@ func (h *ResponsesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auth check (timing-safe comparison)
-	if !tokenMatch(extractBearerToken(r), h.token) {
+	// Auth + RBAC check (gateway token or API key, operator required for POST)
+	auth := resolveAuth(r, h.token)
+	if !auth.Authenticated {
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	if !permissions.HasMinRole(auth.Role, permissions.RoleOperator) {
+		http.Error(w, `{"error":"permission denied: insufficient role"}`, http.StatusForbidden)
 		return
 	}
 
@@ -124,10 +130,10 @@ func (h *ResponsesHandler) handleNonStream(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	resp := map[string]interface{}{
+	resp := map[string]any{
 		"id":     responseID,
 		"status": "completed",
-		"output": []map[string]interface{}{{
+		"output": []map[string]any{{
 			"type":    "message",
 			"role":    "assistant",
 			"content": []map[string]string{{"type": "text", "text": result.Content}},
@@ -159,9 +165,9 @@ func (h *ResponsesHandler) handleStream(w http.ResponseWriter, r *http.Request, 
 	w.WriteHeader(http.StatusOK)
 
 	// response.started
-	writeResponseEvent(w, flusher, map[string]interface{}{
+	writeResponseEvent(w, flusher, map[string]any{
 		"type": "response.started",
-		"response": map[string]interface{}{
+		"response": map[string]any{
 			"id":         responseID,
 			"status":     "in_progress",
 			"created_at": time.Now().Unix(),
@@ -180,9 +186,9 @@ func (h *ResponsesHandler) handleStream(w http.ResponseWriter, r *http.Request, 
 
 	if err != nil {
 		// response.done with error
-		writeResponseEvent(w, flusher, map[string]interface{}{
+		writeResponseEvent(w, flusher, map[string]any{
 			"type": "response.done",
-			"response": map[string]interface{}{
+			"response": map[string]any{
 				"id":     responseID,
 				"status": "failed",
 				"error":  err.Error(),
@@ -192,16 +198,16 @@ func (h *ResponsesHandler) handleStream(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// response.delta
-	writeResponseEvent(w, flusher, map[string]interface{}{
+	writeResponseEvent(w, flusher, map[string]any{
 		"type": "response.delta",
-		"delta": map[string]interface{}{
+		"delta": map[string]any{
 			"type":    "content",
 			"content": result.Content,
 		},
 	})
 
 	// response.done
-	doneResp := map[string]interface{}{
+	doneResp := map[string]any{
 		"id":     responseID,
 		"status": "completed",
 	}
@@ -213,13 +219,13 @@ func (h *ResponsesHandler) handleStream(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	writeResponseEvent(w, flusher, map[string]interface{}{
+	writeResponseEvent(w, flusher, map[string]any{
 		"type":     "response.done",
 		"response": doneResp,
 	})
 }
 
-func writeResponseEvent(w http.ResponseWriter, flusher http.Flusher, data interface{}) {
+func writeResponseEvent(w http.ResponseWriter, flusher http.Flusher, data any) {
 	jsonData, _ := json.Marshal(data)
 	fmt.Fprintf(w, "data: %s\n\n", jsonData)
 	flusher.Flush()

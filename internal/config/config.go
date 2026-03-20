@@ -40,6 +40,7 @@ func (f *FlexibleStringSlice) UnmarshalJSON(data []byte) error {
 
 // Config is the root configuration for the GoClaw Gateway.
 type Config struct {
+	DataDir   string          `json:"data_dir,omitempty"` // persistent data directory (default: ~/.goclaw/data)
 	Agents    AgentsConfig    `json:"agents"`
 	Channels  ChannelsConfig  `json:"channels"`
 	Providers ProvidersConfig `json:"providers"`
@@ -74,7 +75,7 @@ type DatabaseConfig struct {
 
 // SkillsConfig configures the skills storage system.
 type SkillsConfig struct {
-	StorageDir string `json:"storage_dir,omitempty"` // directory for skill content (default: ~/.goclaw/skills-store/)
+	StorageDir string `json:"storage_dir,omitempty"` // directory for skill content (default: dataDir/skills-store/)
 }
 
 // AgentBinding maps a channel/peer pattern to a specific agent.
@@ -124,10 +125,6 @@ type AgentDefaults struct {
 	// Bootstrap context truncation limits (matching TS bootstrapMaxChars / bootstrapTotalMaxChars)
 	BootstrapMaxChars      int `json:"bootstrapMaxChars,omitempty"`      // per-file max before truncation (default 20000)
 	BootstrapTotalMaxChars int `json:"bootstrapTotalMaxChars,omitempty"` // total budget across all files (default 24000)
-	// IntentClassify enables LLM-based intent classification for messages sent while agent is busy.
-	// When enabled, status queries ("what are you doing?") get immediate replies instead of queueing.
-	// Default: true (nil = true).
-	IntentClassify *bool `json:"intent_classify,omitempty"`
 }
 
 // CompactionConfig configures session compaction behaviour.
@@ -382,6 +379,7 @@ type AgentSpec struct {
 func (c *Config) ReplaceFrom(src *Config) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.DataDir = src.DataDir
 	c.Agents = src.Agents
 	c.Channels = src.Channels
 	c.Providers = src.Providers

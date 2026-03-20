@@ -2,15 +2,16 @@ package http
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
-	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
@@ -18,24 +19,19 @@ import (
 
 // AgentsHandler handles agent CRUD and sharing endpoints.
 type AgentsHandler struct {
-	agents    store.AgentStore
-	token     string
-	workspace string
-	msgBus    *bus.MessageBus     // for cache invalidation events (nil = no events)
-	summoner  *AgentSummoner      // LLM-based agent setup (nil = disabled)
-	isOwner   func(string) bool   // checks if user ID is a system owner (nil = no owners configured)
-	activity  store.ActivityStore // optional audit logging (nil = disabled)
+	agents           store.AgentStore
+	token            string
+	defaultWorkspace string            // default workspace path template (e.g. "~/.goclaw/workspace")
+	msgBus           *bus.MessageBus   // for cache invalidation events (nil = no events)
+	summoner         *AgentSummoner    // LLM-based agent setup (nil = disabled)
+	isOwner          func(string) bool // checks if user ID is a system owner (nil = no owners configured)
 }
-
-// SetActivityStore sets the optional activity audit store.
-func (h *AgentsHandler) SetActivityStore(a store.ActivityStore) { h.activity = a }
 
 // NewAgentsHandler creates a handler for agent management endpoints.
 // isOwner is a function that checks if a user ID is in GOCLAW_OWNER_IDS (nil = disabled).
-func NewAgentsHandler(agents store.AgentStore, token string, workspace string, msgBus *bus.MessageBus, summoner *AgentSummoner, isOwner func(string) bool) *AgentsHandler {
-	return &AgentsHandler{agents: agents, token: token, workspace: workspace, msgBus: msgBus, summoner: summoner, isOwner: isOwner}
+func NewAgentsHandler(agents store.AgentStore, token, defaultWorkspace string, msgBus *bus.MessageBus, summoner *AgentSummoner, isOwner func(string) bool) *AgentsHandler {
+	return &AgentsHandler{agents: agents, token: token, defaultWorkspace: defaultWorkspace, msgBus: msgBus, summoner: summoner, isOwner: isOwner}
 }
-
 
 // isOwnerUser checks if the given user ID is a system owner.
 func (h *AgentsHandler) isOwnerUser(userID string) bool {
@@ -50,21 +46,6 @@ func (h *AgentsHandler) emitCacheInvalidate(kind, key string) {
 	h.msgBus.Broadcast(bus.Event{
 		Name:    protocol.EventCacheInvalidate,
 		Payload: bus.CacheInvalidatePayload{Kind: kind, Key: key},
-	})
-}
-
-// logActivity records an audit log entry if the activity store is set.
-func (h *AgentsHandler) logActivity(r *http.Request, actorID, action, entityType, entityID string) {
-	if h.activity == nil {
-		return
-	}
-	h.activity.Log(r.Context(), &store.ActivityLog{
-		ActorType:  "user",
-		ActorID:    actorID,
-		Action:     action,
-		EntityType: entityType,
-		EntityID:   entityID,
-		IPAddress:  r.RemoteAddr,
 	})
 }
 
@@ -87,23 +68,7 @@ func (h *AgentsHandler) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (h *AgentsHandler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if h.token != "" {
-			if extractBearerToken(r) != h.token {
-				locale := extractLocale(r)
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": i18n.T(locale, i18n.MsgUnauthorized)})
-				return
-			}
-		}
-		// Inject user_id and locale into context
-		userID := extractUserID(r)
-		ctx := store.WithLocale(r.Context(), extractLocale(r))
-		if userID != "" {
-			ctx = store.WithUserID(ctx, userID)
-		}
-		r = r.WithContext(ctx)
-		next(w, r)
-	}
+	return requireAuth(h.token, "", next)
 }
 
 func (h *AgentsHandler) handleList(w http.ResponseWriter, r *http.Request) {
@@ -126,7 +91,7 @@ func (h *AgentsHandler) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"agents": agents})
+	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
 }
 
 func (h *AgentsHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -159,15 +124,15 @@ func (h *AgentsHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		req.AgentType = store.AgentTypeOpen
 	}
 	if req.ContextWindow <= 0 {
-		req.ContextWindow = 200000
+		req.ContextWindow = config.DefaultContextWindow
 	}
 	if req.MaxToolIterations <= 0 {
-		req.MaxToolIterations = 20
+		req.MaxToolIterations = config.DefaultMaxIterations
+	}
+	if req.Workspace == "" {
+		req.Workspace = fmt.Sprintf("%s/%s", h.defaultWorkspace, req.AgentKey)
 	}
 	req.RestrictToWorkspace = true
-	if req.Workspace == "" && h.workspace != "" {
-		req.Workspace = filepath.Join(h.workspace, req.AgentKey+"-workspace")
-	}
 
 	// Default: enable compaction and memory for new agents
 	if len(req.CompactionConfig) == 0 {
@@ -205,7 +170,7 @@ func (h *AgentsHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		go h.summoner.SummonAgent(req.ID, req.Provider, req.Model, description)
 	}
 
-	h.logActivity(r, userID, "agent.created", "agent", req.ID.String())
+	emitAudit(h.msgBus, r, "agent.created", "agent", req.ID.String())
 	writeJSON(w, http.StatusCreated, req)
 }
 
@@ -274,11 +239,12 @@ func (h *AgentsHandler) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Prevent changing owner_id
-	delete(updates, "owner_id")
-	delete(updates, "id")
+	// Allowlist: only permit known agent columns to be updated.
+	// Defense-in-depth against column injection via arbitrary JSON keys.
+	allowed := filterAllowedKeys(updates, agentAllowedFields)
+	allowed["restrict_to_workspace"] = true
 
-	if err := h.agents.Update(r.Context(), id, updates); err != nil {
+	if err := h.agents.Update(r.Context(), id, allowed); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -288,7 +254,7 @@ func (h *AgentsHandler) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	h.emitCacheInvalidate(bus.CacheKindBootstrap, id.String())
 
 	// Cascade: if status changed, broadcast so channel instances and cron jobs react.
-	if newStatus, ok := updates["status"].(string); ok && newStatus != ag.Status {
+	if newStatus, ok := allowed["status"].(string); ok && newStatus != ag.Status {
 		if h.msgBus != nil {
 			h.msgBus.Broadcast(bus.Event{
 				Name: bus.EventAgentStatusChanged,
@@ -301,7 +267,7 @@ func (h *AgentsHandler) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	h.logActivity(r, userID, "agent.updated", "agent", id.String())
+	emitAudit(h.msgBus, r, "agent.updated", "agent", id.String())
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
@@ -334,6 +300,6 @@ func (h *AgentsHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 	h.emitCacheInvalidate(bus.CacheKindAgent, ag.AgentKey)
 	h.emitCacheInvalidate(bus.CacheKindBootstrap, id.String())
 
-	h.logActivity(r, userID, "agent.deleted", "agent", id.String())
+	emitAudit(h.msgBus, r, "agent.deleted", "agent", id.String())
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }

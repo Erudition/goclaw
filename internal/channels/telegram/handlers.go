@@ -148,7 +148,15 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		default: // "pairing" or unknown → secure default
 			paired := false
 			if c.pairingService != nil {
-				paired = c.pairingService.IsPaired(userID, c.Name()) || c.pairingService.IsPaired(senderID, c.Name())
+				p1, err1 := c.pairingService.IsPaired(userID, c.Name())
+				p2, err2 := c.pairingService.IsPaired(senderID, c.Name())
+				if err1 != nil || err2 != nil {
+					slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
+						"user_id", userID, "channel", c.Name(), "err1", err1, "err2", err2)
+					paired = true
+				} else {
+					paired = p1 || p2
+				}
 			}
 			inAllowList := c.HasAllowList() && (c.IsAllowed(userID) || c.IsAllowed(senderID))
 
@@ -243,6 +251,25 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		)
 
 		if !wasMentioned {
+			// Guard: skip recording for unpaired groups — don't leak message data.
+			// Uses approvedGroups cache (same pattern as the pairing gate below).
+			if topicCfg.groupPolicy == "pairing" && c.pairingService != nil {
+				if _, cached := c.approvedGroups.Load(chatIDStr); !cached {
+					groupSenderID := fmt.Sprintf("group:%d", chatID)
+					paired, pairErr := c.pairingService.IsPaired(groupSenderID, c.Name())
+					if pairErr != nil {
+						slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
+							"group_sender", groupSenderID, "channel", c.Name(), "error", pairErr)
+						paired = true
+					}
+					if paired {
+						c.approvedGroups.Store(chatIDStr, true)
+					} else {
+						return // silently skip — no pending history, no contact
+					}
+				}
+			}
+
 			c.groupHistory.Record(localKey, channels.HistoryEntry{
 				Sender:    senderLabel,
 				SenderID:  senderID,
@@ -253,7 +280,8 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 
 			// Collect contact even when bot is not mentioned (cache prevents DB spam).
 			if cc := c.ContactCollector(); cc != nil {
-				cc.EnsureContact(ctx, c.Type(), c.Name(), userID, userID, user.FirstName, user.Username, "group")
+				contactName := strings.TrimSpace(user.FirstName + " " + user.LastName)
+				cc.EnsureContact(ctx, c.Type(), c.Name(), userID, userID, contactName, user.Username, "group")
 			}
 
 			slog.Debug("telegram group message recorded (no mention)",
@@ -267,7 +295,13 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	if isGroup && topicCfg.groupPolicy == "pairing" && c.pairingService != nil {
 		if _, cached := c.approvedGroups.Load(chatIDStr); !cached {
 			groupSenderID := fmt.Sprintf("group:%d", chatID)
-			if c.pairingService.IsPaired(groupSenderID, c.Name()) {
+			paired, err := c.pairingService.IsPaired(groupSenderID, c.Name())
+			if err != nil {
+				slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
+					"group_sender", groupSenderID, "channel", c.Name(), "error", err)
+				paired = true
+			}
+			if paired {
 				c.approvedGroups.Store(chatIDStr, true)
 			} else {
 				c.sendGroupPairingReply(ctx, chatID, chatIDStr, groupSenderID, localKey, messageThreadID, message.Chat.Title)
@@ -396,20 +430,10 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	_, thinkCancel := context.WithCancel(ctx)
 	c.stopThinking.Store(localKey, &thinkingCancel{fn: thinkCancel})
 
-	// Send "Thinking..." placeholder for DMs.
-	// The streaming system will edit this message progressively (editMessageText),
-	// giving a smooth transition: "Thinking..." → streaming chunks → final formatted response.
-	// Groups: no placeholder; response replies to the sender's message.
-	if !isGroup {
-		thinkMsg := tu.Message(chatIDObj, "Thinking...")
-		if dmThreadID > 0 {
-			thinkMsg.MessageThreadID = dmThreadID
-		}
-		pMsg, err := c.bot.SendMessage(ctx, thinkMsg)
-		if err == nil {
-			c.placeholders.Store(localKey, pMsg.MessageID)
-		}
-	}
+	// No "Thinking..." placeholder — the DraftStream creates its own message
+	// on the first streaming chunk (sendMessage on first flush).
+	// This avoids "reply to deleted message" artifacts and is cleaner UX:
+	// user sees typing indicator → first content appears directly.
 
 	metadata := map[string]string{
 		"message_id": fmt.Sprintf("%d", message.MessageID),
@@ -456,6 +480,11 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 				break
 			}
 		}
+	}
+
+	// Collect contact for processed messages (DM + group-mentioned).
+	if cc := c.ContactCollector(); cc != nil {
+		cc.EnsureContact(ctx, c.Type(), c.Name(), senderID, userID, user.FirstName, user.Username, peerKind)
 	}
 
 	c.Bus().PublishInbound(bus.InboundMessage{

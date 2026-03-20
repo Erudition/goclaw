@@ -4,36 +4,45 @@ PostgreSQL multi-tenant AI agent gateway with WebSocket RPC + HTTP API.
 
 ## Tech Stack
 
-**Backend:** Go 1.25, Cobra CLI, gorilla/websocket, pgx/v5 (database/sql, no ORM), golang-migrate, go-rod/rod, telego (Telegram)
+**Backend:** Go 1.26, Cobra CLI, gorilla/websocket, pgx/v5 (database/sql, no ORM), golang-migrate, go-rod/rod, telego (Telegram)
 **Web UI:** React 19, Vite 6, TypeScript, Tailwind CSS 4, Radix UI, Zustand, React Router 7. Located in `ui/web/`. **Use `pnpm` (not npm).**
-**Database:** PostgreSQL 15+ with pgvector. Raw SQL with `$1, $2` positional params. Nullable columns: `*string`, `*time.Time`, etc.
+**Database:** PostgreSQL 18 with pgvector. Raw SQL with `$1, $2` positional params. Nullable columns: `*string`, `*time.Time`, etc.
 
 ## Project Structure
 
 ```
 cmd/                          CLI commands, gateway startup, onboard wizard, migrations
 internal/
+├── agent/                    Agent loop (think→act→observe), router, resolver, input guard
+├── bootstrap/                System prompt files (SOUL.md, IDENTITY.md) + seeding + per-user seed
+├── bus/                      Event bus system
+├── cache/                    Caching layer
+├── channels/                 Channel manager: Telegram, Feishu/Lark, Zalo, Discord, WhatsApp
+├── config/                   Config loading (JSON5) + env var overlay
+├── crypto/                   AES-256-GCM encryption for API keys
+├── cron/                     Cron scheduling (at/every/cron expr)
 ├── gateway/                  WS + HTTP server, client, method router
 │   └── methods/              RPC handlers (chat, agents, sessions, config, skills, cron, pairing)
-├── agent/                    Agent loop (think→act→observe), router, resolver, input guard
-├── providers/                LLM providers: Anthropic (native HTTP+SSE), OpenAI-compat (HTTP+SSE)
-├── tools/                    Tool registry, filesystem, exec, web, memory, subagent, MCP bridge
-├── store/                    Store interfaces + pg/ (PostgreSQL) implementations
-├── bootstrap/                System prompt files (SOUL.md, IDENTITY.md) + seeding + per-user seed
-├── config/                   Config loading (JSON5) + env var overlay
-├── channels/                 Channel manager: Telegram, Feishu/Lark, Zalo, Discord, WhatsApp
+├── hooks/                    Hook system for extensibility
 ├── http/                     HTTP API (/v1/chat/completions, /v1/agents, /v1/skills, etc.)
-├── skills/                   SKILL.md loader + BM25 search
-├── memory/                   Memory system (pgvector)
-├── tracing/                  LLM call tracing + optional OTel export (build-tag gated)
-├── scheduler/                Lane-based concurrency (main/subagent/cron)
-├── cron/                     Cron scheduling (at/every/cron expr)
-├── permissions/              RBAC (admin/operator/viewer)
-├── pairing/                  Browser pairing (8-char codes)
-├── crypto/                   AES-256-GCM encryption for API keys
-├── sandbox/                  Docker-based code sandbox
-├── tts/                      Text-to-Speech (OpenAI, ElevenLabs, Edge, MiniMax)
 ├── i18n/                     Message catalog: T(locale, key, args...) + per-locale catalogs (en/vi/zh)
+├── knowledgegraph/           Knowledge graph storage and traversal
+├── mcp/                      Model Context Protocol bridge/server
+├── media/                    Media handling utilities
+├── memory/                   Memory system (pgvector)
+├── oauth/                    OAuth authentication
+├── permissions/              RBAC (admin/operator/viewer)
+├── providers/                LLM providers: Anthropic (native HTTP+SSE), OpenAI-compat (HTTP+SSE), DashScope (Alibaba Qwen), Claude CLI (stdio+MCP bridge), ACP (Anthropic Console Proxy), Codex (OpenAI)
+├── sandbox/                  Docker-based code sandbox
+├── scheduler/                Lane-based concurrency (main/subagent/cron)
+├── sessions/                 Session management
+├── skills/                   SKILL.md loader + BM25 search
+├── store/                    Store interfaces + pg/ (PostgreSQL) implementations
+├── tasks/                    Task management
+├── tools/                    Tool registry, filesystem, exec, web, memory, subagent, MCP bridge
+├── tracing/                  LLM call tracing + optional OTel export (build-tag gated)
+├── tts/                      Text-to-Speech (OpenAI, ElevenLabs, Edge, MiniMax)
+├── upgrade/                  Database schema version tracking
 pkg/protocol/                 Wire types (frames, methods, errors, events)
 pkg/browser/                  Browser automation (Rod + CDP)
 migrations/                   PostgreSQL migration files
@@ -45,7 +54,7 @@ ui/web/                       React SPA (pnpm, Vite, Tailwind, Radix UI)
 - **Store layer:** Interface-based (`store.SessionStore`, `store.AgentStore`, etc.) with pg/ (PostgreSQL) implementations. Uses `database/sql` + `pgx/v5/stdlib`, raw SQL, `execMapUpdate()` helper in `pg/helpers.go`
 - **Agent types:** `open` (per-user context, 7 files) vs `predefined` (shared context + USER.md per-user)
 - **Context files:** `agent_context_files` (agent-level) + `user_context_files` (per-user), routed via `ContextFileInterceptor`
-- **Providers:** Anthropic (native HTTP+SSE) and OpenAI-compat (generic). Both use `RetryDo()` for retries. Loads from `llm_providers` table with encrypted API keys
+- **Providers:** Anthropic (native HTTP+SSE), OpenAI-compat (HTTP+SSE), DashScope (Alibaba Qwen), Claude CLI (stdio+MCP bridge), ACP (Anthropic Console Proxy), Codex (OpenAI). All use `RetryDo()` for retries. Loads from `llm_providers` table with encrypted API keys
 - **Agent loop:** `RunRequest` → think→act→observe → `RunResult`. Events: `run.started`, `run.completed`, `chunk`, `tool.call`, `tool.result`. Auto-summarization at >75% context
 - **Context propagation:** `store.WithAgentType(ctx)`, `store.WithUserID(ctx)`, `store.WithAgentID(ctx)`, `store.WithLocale(ctx)`
 - **WebSocket protocol (v3):** Frame types `req`/`res`/`event`. First request must be `connect`
@@ -82,6 +91,9 @@ Go conventions to follow:
 - Always handle errors; don't ignore return values
 - **Migrations:** When adding a new SQL migration file in `migrations/`, bump `RequiredSchemaVersion` in `internal/upgrade/version.go` to match the new migration number
 - **i18n strings:** When adding user-facing error messages, add key to `internal/i18n/keys.go` and translations to `catalog_en.go`, `catalog_vi.go`, `catalog_zh.go`. For UI strings, add to all locale JSON files in `ui/web/src/i18n/locales/{en,vi,zh}/`
+- **SQL safety:** When implementing or modifying SQL store code (`store/pg/*.go`), always verify: (1) All user inputs use parameterized queries (`$1, $2, ...`), never string concatenation — prevents SQL injection. (2) Queries are optimized — no N+1 queries, no unnecessary full table scans. (3) WHERE clauses, JOINs, and ORDER BY columns use existing indices — check migration files for available indexes
+- **DB query reuse:** Before adding a new DB query for key entities (teams, agents, sessions, users), check if the same data is already fetched earlier in the current flow/pipeline. Prefer passing resolved data through context, event payloads, or function params rather than re-querying. Duplicate queries waste DB resources and add latency
+- **Solution design:** When designing a fix or feature, identify the root cause first — don't just patch symptoms. Think through production scenarios (high concurrency, multi-tenant isolation, failure cascades, long-running sessions) to ensure the solution holds up. Prefer explicit configuration over runtime heuristics. Prefer the simplest solution that addresses the root cause directly
 
 ## Mobile UI/UX Rules
 
@@ -97,4 +109,7 @@ When implementing or modifying web UI components, follow these rules to ensure m
 - **Virtual keyboard:** Chat input uses `useVirtualKeyboard()` hook + `var(--keyboard-height, 0px)` CSS var to stay above the keyboard
 - **Scroll behavior:** Use `overscroll-contain` on scrollable areas to prevent background scroll. Auto-scroll: smooth for incoming messages, instant on user send
 - **Landscape:** Use `landscape-compact` class on top bars to reduce padding in phone landscape orientation (`max-height: 500px`)
+- **Portal dropdowns in dialogs:** Custom dropdown components using `createPortal(content, document.body)` MUST add `pointer-events-auto` class to the dropdown element. Radix Dialog sets `pointer-events: none` on `document.body` — without this class, dropdowns are unclickable. Radix-native portals (Select, Popover) handle this automatically
 - **Timezone:** User timezone stored in Zustand (`useUiStore`). Charts use `formatBucketTz()` from `lib/format.ts` with native `Intl.DateTimeFormat` — no date-fns-tz dependency
+- **ErrorBoundary key:** `AppLayout` uses `<ErrorBoundary key={stableErrorBoundaryKey(pathname)}>` which strips dynamic segments (`/chat/session-A` → `/chat`). NEVER use `key={location.pathname}` on ErrorBoundary/Suspense wrapping `<Outlet>` — it causes full page remount on param changes. Pages with sub-navigation (chat sessions, detail pages) must share a stable key
+- **Route params as source of truth:** For pages with URL params (e.g. `/chat/:sessionKey`), derive state from `useParams()` — do NOT duplicate into `useState`. Dual state causes race conditions between `setState` and `navigate()` leading to UI flash (state bounces: B→A→B). Use optional params (`/chat/:sessionKey?`) instead of two separate routes

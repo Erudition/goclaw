@@ -37,7 +37,14 @@ func (c *Channel) checkDMPolicy(senderID, chatID string) bool {
 	default: // "pairing"
 		paired := false
 		if c.pairingService != nil {
-			paired = c.pairingService.IsPaired(senderID, c.Name())
+			p, err := c.pairingService.IsPaired(senderID, c.Name())
+			if err != nil {
+				slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
+					"sender_id", senderID, "channel", c.Name(), "error", err)
+				paired = true
+			} else {
+				paired = p
+			}
 		}
 		inAllowList := c.HasAllowList() && c.IsAllowed(senderID)
 
@@ -115,7 +122,17 @@ func (c *Channel) checkGroupPolicy(senderID, groupID string) bool {
 			// pass — already approved
 		} else {
 			groupSenderID := fmt.Sprintf("group:%s", groupID)
-			if c.pairingService != nil && c.pairingService.IsPaired(groupSenderID, c.Name()) {
+			paired := false
+			if c.pairingService != nil {
+				p, err := c.pairingService.IsPaired(groupSenderID, c.Name())
+				if err != nil {
+					slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
+						"group_sender", groupSenderID, "channel", c.Name(), "error", err)
+					p = true
+				}
+				paired = p
+			}
+			if paired {
 				c.approvedGroups.Store(groupID, true)
 			} else {
 				c.sendPairingReply(groupSenderID, groupID)

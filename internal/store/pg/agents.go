@@ -164,6 +164,17 @@ func (s *PGAgentStore) Update(ctx context.Context, id uuid.UUID, updates map[str
 	if len(updates) == 0 {
 		return nil
 	}
+
+	// If setting this agent as default, unset any existing default first.
+	if v, ok := updates["is_default"]; ok {
+		if isDefault, _ := v.(bool); isDefault {
+			if _, err := s.db.ExecContext(ctx,
+				"UPDATE agents SET is_default = false WHERE is_default = true AND id != $1 AND deleted_at IS NULL", id); err != nil {
+				slog.Warn("agents.unset_default", "error", err)
+			}
+		}
+	}
+
 	updates["updated_at"] = time.Now()
 	err := execMapUpdateWhere(ctx, s.db, "agents", updates, "id = $IDX AND deleted_at IS NULL", id)
 	if err != nil {
@@ -183,8 +194,7 @@ func (s *PGAgentStore) Update(ctx context.Context, id uuid.UUID, updates map[str
 }
 
 func (s *PGAgentStore) Delete(ctx context.Context, id uuid.UUID) error {
-	// Soft delete
-	_, err := s.db.ExecContext(ctx, "UPDATE agents SET deleted_at = NOW() WHERE id = $1", id)
+	_, err := s.db.ExecContext(ctx, "DELETE FROM agents WHERE id = $1", id)
 	return err
 }
 
@@ -376,6 +386,7 @@ func scanAgentRows(rows *sql.Rows) ([]store.AgentData, error) {
 
 // execMapUpdateWhere is like execMapUpdate but with a custom WHERE clause.
 // The whereClause should use $IDX as placeholder for the ID (will be replaced with the next arg index).
+// Column names are validated against a strict identifier regex to prevent SQL injection.
 func execMapUpdateWhere(ctx context.Context, db *sql.DB, table string, updates map[string]any, whereClause string, id uuid.UUID) error {
 	if len(updates) == 0 {
 		return nil
@@ -384,6 +395,10 @@ func execMapUpdateWhere(ctx context.Context, db *sql.DB, table string, updates m
 	var args []any
 	i := 1
 	for col, val := range updates {
+		if !validColumnName.MatchString(col) {
+			slog.Warn("security.invalid_column_name", "table", table, "column", col)
+			return fmt.Errorf("invalid column name: %q", col)
+		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col, i))
 		args = append(args, val)
 		i++

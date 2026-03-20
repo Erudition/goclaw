@@ -153,25 +153,31 @@ func (r *Router) IsRunning(agentID string) bool {
 
 // --- Active Run Tracking (matching TS chat-abort.ts) ---
 
-// ActiveRun tracks a running agent invocation so it can be aborted via chat.abort.
+// ActiveRun tracks a running agent invocation so it can be aborted via chat.abort
+// and supports mid-run message injection via InjectCh.
 type ActiveRun struct {
 	RunID      string
 	SessionKey string
 	AgentID    string
 	Cancel     context.CancelFunc
 	StartedAt  time.Time
+	InjectCh   chan InjectedMessage // buffered channel for mid-run user message injection
 }
 
 // RegisterRun records an active run so it can be aborted later.
-func (r *Router) RegisterRun(runID, sessionKey, agentID string, cancel context.CancelFunc) {
+// Returns a receive-only channel for mid-run message injection.
+func (r *Router) RegisterRun(runID, sessionKey, agentID string, cancel context.CancelFunc) <-chan InjectedMessage {
+	injectCh := make(chan InjectedMessage, injectBufferSize)
 	r.activeRuns.Store(runID, &ActiveRun{
 		RunID:      runID,
 		SessionKey: sessionKey,
 		AgentID:    agentID,
 		Cancel:     cancel,
 		StartedAt:  time.Now(),
+		InjectCh:   injectCh,
 	})
 	r.sessionRuns.Store(sessionKey, runID)
+	return injectCh
 }
 
 // UnregisterRun removes a completed/cancelled run from tracking.
@@ -202,6 +208,26 @@ func (r *Router) AbortRun(runID, sessionKey string) bool {
 	r.sessionRuns.Delete(run.SessionKey)
 	r.activeRuns.Delete(runID)
 	return true
+}
+
+// InjectMessage sends a user message to the running loop for a session.
+// Returns true if the message was accepted, false if no active run or channel full.
+func (r *Router) InjectMessage(sessionKey string, msg InjectedMessage) bool {
+	runIDVal, ok := r.sessionRuns.Load(sessionKey)
+	if !ok {
+		return false
+	}
+	runVal, ok := r.activeRuns.Load(runIDVal)
+	if !ok {
+		return false
+	}
+	run := runVal.(*ActiveRun)
+	select {
+	case run.InjectCh <- msg:
+		return true
+	default:
+		return false // channel full
+	}
 }
 
 // InvalidateUserWorkspace clears the cached workspace for a user across all cached agent loops.

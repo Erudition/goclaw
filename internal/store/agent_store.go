@@ -3,10 +3,26 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 )
+
+// sanitizeToolCallPrefix strips characters not in [a-z0-9_{}] from the prefix.
+// This matches the UI-side regex and prevents injection via direct API calls.
+func sanitizeToolCallPrefix(s string) string {
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '{' || r == '}' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
 
 // Agent type constants.
 const (
@@ -61,6 +77,20 @@ func (a *AgentData) ParseToolsConfig() *config.ToolPolicySpec {
 	if json.Unmarshal(a.ToolsConfig, &c) != nil {
 		return nil
 	}
+	// Backward compat: migrate old "toolPrefix" key to "toolCallPrefix"
+	if c.ToolCallPrefix == "" {
+		var raw map[string]json.RawMessage
+		if json.Unmarshal(a.ToolsConfig, &raw) == nil {
+			if v, ok := raw["toolPrefix"]; ok {
+				var s string
+				if json.Unmarshal(v, &s) == nil && s != "" {
+					c.ToolCallPrefix = s
+				}
+			}
+		}
+	}
+	// Sanitize: only allow [a-z0-9_{}] to prevent injection via API bypass.
+	c.ToolCallPrefix = sanitizeToolCallPrefix(c.ToolCallPrefix)
 	return &c
 }
 
@@ -139,6 +169,21 @@ func (a *AgentData) ParseThinkingLevel() string {
 	return cfg.ThinkingLevel
 }
 
+// ParseMaxTokens extracts max_tokens from other_config JSONB.
+// Returns 0 if not configured (caller should apply default).
+func (a *AgentData) ParseMaxTokens() int {
+	if len(a.OtherConfig) == 0 {
+		return 0
+	}
+	var cfg struct {
+		MaxTokens int `json:"max_tokens"`
+	}
+	if json.Unmarshal(a.OtherConfig, &cfg) != nil {
+		return 0
+	}
+	return cfg.MaxTokens
+}
+
 // ParseSelfEvolve extracts self_evolve from other_config JSONB.
 // When true, predefined agents can update their SOUL.md (style/tone) through chat.
 func (a *AgentData) ParseSelfEvolve() bool {
@@ -152,6 +197,84 @@ func (a *AgentData) ParseSelfEvolve() bool {
 		return false
 	}
 	return cfg.SelfEvolve
+}
+
+// ParseSkillEvolve extracts skill_evolve from other_config JSONB.
+// When true, the agent's learning loop is enabled: system prompt includes skill
+// creation guidance, and the loop injects nudges at tool count milestones.
+func (a *AgentData) ParseSkillEvolve() bool {
+	if len(a.OtherConfig) == 0 {
+		return false
+	}
+	var cfg struct {
+		SkillEvolve bool `json:"skill_evolve"`
+	}
+	if json.Unmarshal(a.OtherConfig, &cfg) != nil {
+		return false
+	}
+	return cfg.SkillEvolve
+}
+
+// ParseSkillNudgeInterval extracts skill_nudge_interval from other_config JSONB.
+// Returns the interval (in tool calls) at which the loop injects a skill creation reminder.
+// Default 15 when not set. Explicitly 0 disables mid-loop nudges (system prompt guidance still shown).
+func (a *AgentData) ParseSkillNudgeInterval() int {
+	if len(a.OtherConfig) == 0 {
+		return 15
+	}
+	var cfg struct {
+		SkillNudgeInterval *int `json:"skill_nudge_interval"`
+	}
+	if json.Unmarshal(a.OtherConfig, &cfg) != nil {
+		return 15
+	}
+	if cfg.SkillNudgeInterval == nil {
+		return 15
+	}
+	return *cfg.SkillNudgeInterval
+}
+
+// WorkspaceSharingConfig controls per-user workspace isolation.
+// When shared_dm/shared_group is true, users share the base workspace directory
+// instead of each getting an isolated subfolder.
+type WorkspaceSharingConfig struct {
+	SharedDM    bool     `json:"shared_dm"`
+	SharedGroup bool     `json:"shared_group"`
+	SharedUsers []string `json:"shared_users,omitempty"`
+	ShareMemory bool     `json:"share_memory"`
+}
+
+// ParseWorkspaceSharing extracts workspace_sharing from other_config JSONB.
+// Returns nil if not configured or all fields are default (isolation enabled).
+func (a *AgentData) ParseWorkspaceSharing() *WorkspaceSharingConfig {
+	if len(a.OtherConfig) == 0 {
+		return nil
+	}
+	var cfg struct {
+		WS *WorkspaceSharingConfig `json:"workspace_sharing"`
+	}
+	if json.Unmarshal(a.OtherConfig, &cfg) != nil || cfg.WS == nil {
+		return nil
+	}
+	if !cfg.WS.SharedDM && !cfg.WS.SharedGroup && len(cfg.WS.SharedUsers) == 0 && !cfg.WS.ShareMemory {
+		return nil
+	}
+	return cfg.WS
+}
+
+// ParseShellDenyGroups extracts shell_deny_groups from other_config JSONB.
+// Returns nil if not configured (all defaults apply).
+func (a *AgentData) ParseShellDenyGroups() map[string]bool {
+	if len(a.OtherConfig) == 0 {
+		return nil
+	}
+	var cfg struct {
+		ShellDenyGroups map[string]bool `json:"shell_deny_groups"`
+	}
+	if json.Unmarshal(a.OtherConfig, &cfg) != nil || len(cfg.ShellDenyGroups) == 0 {
+		return nil
+	}
+	return cfg.ShellDenyGroups
 }
 
 // AgentShareData represents an agent share grant.
@@ -220,12 +343,6 @@ type AgentStore interface {
 	ListUserInstances(ctx context.Context, agentID uuid.UUID) ([]UserInstanceData, error)
 	UpdateUserProfileMetadata(ctx context.Context, agentID uuid.UUID, userID string, metadata map[string]string) error
 
-	// Group file writers (allowlist for protected file edits in group chats)
-	IsGroupFileWriter(ctx context.Context, agentID uuid.UUID, groupID, userID string) (bool, error)
-	AddGroupFileWriter(ctx context.Context, agentID uuid.UUID, groupID, userID, displayName, username string) error
-	RemoveGroupFileWriter(ctx context.Context, agentID uuid.UUID, groupID, userID string) error
-	ListGroupFileWriters(ctx context.Context, agentID uuid.UUID, groupID string) ([]GroupFileWriterData, error)
-	ListGroupFileWriterGroups(ctx context.Context, agentID uuid.UUID) ([]GroupWriterGroupInfo, error)
 }
 
 // UserInstanceData represents a user instance for a predefined agent.
@@ -237,15 +354,3 @@ type UserInstanceData struct {
 	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
-// GroupFileWriterData represents a group file writer entry.
-type GroupFileWriterData struct {
-	UserID      string  `json:"user_id"`
-	DisplayName *string `json:"display_name,omitempty"`
-	Username    *string `json:"username,omitempty"`
-}
-
-// GroupWriterGroupInfo represents a group that has writers configured.
-type GroupWriterGroupInfo struct {
-	GroupID     string `json:"group_id"`
-	WriterCount int    `json:"writer_count"`
-}

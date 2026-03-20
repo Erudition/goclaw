@@ -13,6 +13,17 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
+// effectiveWorkspace returns the per-user workspace from ctx if available,
+// falling back to the interceptor's base workspace.
+// This ensures memory path detection and normalization work correctly
+// for per-user workspaces (e.g. workspace/channel/userID/).
+func effectiveWorkspace(ctx context.Context, baseWorkspace string) string {
+	if ws := ToolWorkspaceFromCtx(ctx); ws != "" {
+		return ws
+	}
+	return baseWorkspace
+}
+
 // isMemoryDir checks if a path refers to the memory directory itself.
 // Handles "memory", "./memory", "/workspace/memory" etc.
 func isMemoryDir(path, workspace string) bool {
@@ -84,7 +95,8 @@ func (m *MemoryInterceptor) SetKGExtractFunc(fn KGExtractFunc) {
 // ReadFile attempts to read a memory file from the DB.
 // Returns (content, true, nil) if handled, or ("", false, nil) if not a memory path.
 func (m *MemoryInterceptor) ReadFile(ctx context.Context, path string) (string, bool, error) {
-	if !isMemoryPath(path, m.workspace) {
+	ws := effectiveWorkspace(ctx, m.workspace)
+	if !isMemoryPath(path, ws) {
 		return "", false, nil
 	}
 
@@ -94,9 +106,9 @@ func (m *MemoryInterceptor) ReadFile(ctx context.Context, path string) (string, 
 	}
 
 	// Normalize absolute path to workspace-relative for DB storage
-	relPath := normalizeToRelative(path, m.workspace)
+	relPath := normalizeToRelative(path, ws)
 
-	userID := store.UserIDFromContext(ctx)
+	userID := store.MemoryUserID(ctx)
 	agentStr := agentID.String()
 
 	// Try per-user first, then global
@@ -115,16 +127,18 @@ func (m *MemoryInterceptor) ReadFile(ctx context.Context, path string) (string, 
 
 // MemoryWriteResult holds the outcome of a memory write operation.
 type MemoryWriteResult struct {
-	Handled     bool
-	KGTriggered bool
+	Handled         bool
+	KGTriggered     bool
+	PreviousContent string // non-empty if an existing document was overwritten (non-append)
 }
 
 // WriteFile attempts to write a memory file to the DB (+ re-index chunks for .md files).
-// Non-.md files are stored but NOT indexed/chunked/embedded,
-// matching TS behavior where only .md files are indexed.
-// Returns MemoryWriteResult with Handled=true if this was a memory path, KGTriggered=true if KG extraction was started.
-func (m *MemoryInterceptor) WriteFile(ctx context.Context, path, content string) (MemoryWriteResult, error) {
-	if !isMemoryPath(path, m.workspace) {
+// When appendMode is true, new content is appended to the existing document with a separator.
+// When appendMode is false and an existing document is overwritten with different content,
+// PreviousContent is populated in the result to allow callers to warn the agent.
+func (m *MemoryInterceptor) WriteFile(ctx context.Context, path, content string, appendMode bool) (MemoryWriteResult, error) {
+	ws := effectiveWorkspace(ctx, m.workspace)
+	if !isMemoryPath(path, ws) {
 		return MemoryWriteResult{}, nil
 	}
 
@@ -134,18 +148,33 @@ func (m *MemoryInterceptor) WriteFile(ctx context.Context, path, content string)
 	}
 
 	// Normalize absolute path to workspace-relative for DB storage
-	relPath := normalizeToRelative(path, m.workspace)
+	relPath := normalizeToRelative(path, ws)
 
-	userID := store.UserIDFromContext(ctx)
+	userID := store.MemoryUserID(ctx)
 	agentStr := agentID.String()
+
+	var previousContent string
+
+	if appendMode {
+		// Append: read existing content and merge with separator.
+		existing, err := m.memStore.GetDocument(ctx, agentStr, userID, relPath)
+		if err == nil && existing != "" {
+			content = existing + "\n\n---\n\n" + content
+		}
+	} else {
+		// Replace: capture previous content for overwrite warning.
+		oldContent, err := m.memStore.GetDocument(ctx, agentStr, userID, relPath)
+		if err == nil && oldContent != "" && oldContent != content {
+			previousContent = oldContent
+		}
+	}
 
 	// Write document to DB
 	if err := m.memStore.PutDocument(ctx, agentStr, userID, relPath, content); err != nil {
 		return MemoryWriteResult{Handled: true}, err
 	}
 
-	// Only index .md files (chunk + embed). Non-.md files (JSON, etc.) are stored
-	// as key-value documents but not searchable via memory_search.
+	// Only index .md files (chunk + embed).
 	if strings.HasSuffix(relPath, ".md") {
 		if err := m.memStore.IndexDocument(ctx, agentStr, userID, relPath); err != nil {
 			slog.Warn("memory interceptor: index failed after write", "path", path, "error", err)
@@ -160,13 +189,14 @@ func (m *MemoryInterceptor) WriteFile(ctx context.Context, path, content string)
 		kgTriggered = true
 	}
 
-	return MemoryWriteResult{Handled: true, KGTriggered: kgTriggered}, nil
+	return MemoryWriteResult{Handled: true, KGTriggered: kgTriggered, PreviousContent: previousContent}, nil
 }
 
 // ListFiles lists memory documents from the DB when path is the memory directory.
 // Returns (listing, true, nil) if handled, or ("", false, nil) if not a memory path.
 func (m *MemoryInterceptor) ListFiles(ctx context.Context, path string) (string, bool, error) {
-	if !isMemoryDir(path, m.workspace) {
+	ws := effectiveWorkspace(ctx, m.workspace)
+	if !isMemoryDir(path, ws) {
 		return "", false, nil
 	}
 
@@ -175,7 +205,7 @@ func (m *MemoryInterceptor) ListFiles(ctx context.Context, path string) (string,
 		return "", false, nil
 	}
 
-	userID := store.UserIDFromContext(ctx)
+	userID := store.MemoryUserID(ctx)
 	docs, err := m.memStore.ListDocuments(ctx, agentID.String(), userID)
 	if err != nil {
 		return "", true, err

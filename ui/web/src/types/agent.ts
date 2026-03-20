@@ -8,6 +8,7 @@ export interface ToolPolicyConfig {
   deny?: string[];
   alsoAllow?: string[];
   byProvider?: Record<string, { profile?: string; allow?: string[]; deny?: string[]; alsoAllow?: string[] }>;
+  toolCallPrefix?: string; // prefix to strip from model's tool call names
 }
 
 export interface SubagentsConfig {
@@ -67,14 +68,11 @@ export interface MemoryConfig {
   text_weight?: number;
 }
 
-export interface QualityGateConfig {
-  event: string;
-  type: "agent" | "command";
-  agent?: string;
-  command?: string;
-  block_on_failure: boolean;
-  max_retries?: number;
-  timeout_seconds?: number;
+export interface WorkspaceSharingConfig {
+  shared_dm?: boolean;
+  shared_group?: boolean;
+  shared_users?: string[];
+  share_memory?: boolean;
 }
 
 export interface AgentData {

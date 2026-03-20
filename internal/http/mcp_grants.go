@@ -51,6 +51,7 @@ func (h *MCPHandler) handleGrantAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.emitCacheInvalidate()
+	emitAudit(h.msgBus, r, "mcp_server.agent_granted", "mcp_server", serverID.String())
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "granted"})
 }
 
@@ -75,6 +76,7 @@ func (h *MCPHandler) handleRevokeAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.emitCacheInvalidate()
+	emitAudit(h.msgBus, r, "mcp_server.agent_revoked", "mcp_server", serverID.String())
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
@@ -93,7 +95,7 @@ func (h *MCPHandler) handleListAgentGrants(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"grants": grants})
+	writeJSON(w, http.StatusOK, map[string]any{"grants": grants})
 }
 
 func (h *MCPHandler) handleListServerGrants(w http.ResponseWriter, r *http.Request) {
@@ -111,7 +113,7 @@ func (h *MCPHandler) handleListServerGrants(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"grants": grants})
+	writeJSON(w, http.StatusOK, map[string]any{"grants": grants})
 }
 
 func (h *MCPHandler) handleGrantUser(w http.ResponseWriter, r *http.Request) {
@@ -157,6 +159,7 @@ func (h *MCPHandler) handleGrantUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.emitCacheInvalidate()
+	emitAudit(h.msgBus, r, "mcp_server.user_granted", "mcp_server", serverID.String())
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "granted"})
 }
 
@@ -181,5 +184,6 @@ func (h *MCPHandler) handleRevokeUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.emitCacheInvalidate()
+	emitAudit(h.msgBus, r, "mcp_server.user_revoked", "mcp_server", serverID.String())
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }

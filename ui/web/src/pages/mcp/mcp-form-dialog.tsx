@@ -80,13 +80,15 @@ export function MCPFormDialog({ open, onOpenChange, server, onSubmit, onTest }: 
   const buildConnectionData = () => {
     let parsedArgs: string[] | undefined = undefined;
     if (isStdio && args.trim()) {
-      // Use regex to split by spaces while respecting double quotes
-      const matches = args.match(/[^\s"']+|"([^"]*)"|'([^']*)'/g);
+      // Split by spaces respecting quoted strings, including --flag="value" patterns.
+      const matches = args.match(/[^\s"']*"([^"]*)"|[^\s"']*'([^']*)'|[^\s]+/g);
       if (matches) {
         parsedArgs = matches.map((m) => {
+          // Strip surrounding quotes from standalone quoted args: "foo bar" → foo bar
           if (m.startsWith('"') && m.endsWith('"')) return m.slice(1, -1);
           if (m.startsWith("'") && m.endsWith("'")) return m.slice(1, -1);
-          return m;
+          // Strip quotes from --flag="value" patterns: --flag="foo bar" → --flag=foo bar
+          return m.replace(/"([^"]*)"/g, "$1").replace(/'([^']*)'/g, "$1");
         });
       }
     }
@@ -170,7 +172,7 @@ export function MCPFormDialog({ open, onOpenChange, server, onSubmit, onTest }: 
           <DialogTitle>{server ? t("form.editTitle") : t("form.createTitle")}</DialogTitle>
         </DialogHeader>
 
-        <div className="grid gap-4 py-2 px-0.5 -mx-0.5 overflow-y-auto min-h-0">
+        <div className="grid gap-4 py-2 -mx-4 px-4 sm:-mx-6 sm:px-6 overflow-y-auto min-h-0">
           <div className="grid gap-1.5">
             <Label htmlFor="mcp-name">{t("form.name")}</Label>
             <Input id="mcp-name" value={name} onChange={(e) => setName(slugify(e.target.value))} placeholder="my-mcp-server" />
@@ -179,7 +181,7 @@ export function MCPFormDialog({ open, onOpenChange, server, onSubmit, onTest }: 
 
           <div className="grid gap-1.5">
             <Label htmlFor="mcp-display">{t("form.displayName")}</Label>
-            <Input id="mcp-display" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="My MCP Server" />
+            <Input id="mcp-display" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder={t("form.displayNamePlaceholder")} />
           </div>
 
           <div className="grid gap-1.5">
@@ -203,18 +205,18 @@ export function MCPFormDialog({ open, onOpenChange, server, onSubmit, onTest }: 
             <>
               <div className="grid gap-1.5">
                 <Label htmlFor="mcp-cmd">{t("form.command")}</Label>
-                <Input id="mcp-cmd" value={command} onChange={(e) => setCommand(e.target.value)} placeholder="npx -y @modelcontextprotocol/server-everything" className="font-mono text-sm" />
+                <Input id="mcp-cmd" value={command} onChange={(e) => setCommand(e.target.value)} placeholder="npx -y @modelcontextprotocol/server-everything" className="font-mono" />
               </div>
               <div className="grid gap-1.5">
                 <Label htmlFor="mcp-args">{t("form.args")}</Label>
-                <Input id="mcp-args" value={args} onChange={(e) => setArgs(e.target.value)} placeholder={t("form.argsPlaceholder")} className="font-mono text-sm" />
+                <Input id="mcp-args" value={args} onChange={(e) => setArgs(e.target.value)} placeholder={t("form.argsPlaceholder")} className="font-mono" />
               </div>
             </>
           ) : (
             <>
               <div className="grid gap-1.5">
                 <Label htmlFor="mcp-url">{t("form.url")}</Label>
-                <Input id="mcp-url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://localhost:3001/sse" className="font-mono text-sm" />
+                <Input id="mcp-url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://localhost:3001/sse" className="font-mono" />
               </div>
               <div className="grid gap-1.5">
                 <Label>{t("form.headers")}</Label>
@@ -246,7 +248,7 @@ export function MCPFormDialog({ open, onOpenChange, server, onSubmit, onTest }: 
             <Label htmlFor="mcp-prefix">{t("form.toolPrefix")}</Label>
             <div className="flex">
               <span className="inline-flex items-center px-2.5 rounded-l-md border border-r-0 border-input bg-muted text-muted-foreground text-sm font-mono">mcp_</span>
-              <Input id="mcp-prefix" value={toolPrefix} onChange={(e) => setToolPrefix(e.target.value.replace(/[^a-z0-9_]/g, ""))} placeholder={name.replace(/-/g, "_") || "auto"} className="rounded-l-none font-mono text-sm" />
+              <Input id="mcp-prefix" value={toolPrefix} onChange={(e) => setToolPrefix(e.target.value.replace(/[^a-z0-9_]/g, ""))} placeholder={name.replace(/-/g, "_") || "auto"} className="rounded-l-none font-mono" />
             </div>
             <p className="text-xs text-muted-foreground">{t("form.toolPrefixHint")} Tools: <code className="text-[10px]">mcp_&#123;prefix&#125;__&#123;tool&#125;</code></p>
           </div>

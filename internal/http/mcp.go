@@ -73,22 +73,7 @@ func (h *MCPHandler) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (h *MCPHandler) auth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if h.token != "" {
-			if extractBearerToken(r) != h.token {
-				locale := extractLocale(r)
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": i18n.T(locale, i18n.MsgUnauthorized)})
-				return
-			}
-		}
-		userID := extractUserID(r)
-		ctx := store.WithLocale(r.Context(), extractLocale(r))
-		if userID != "" {
-			ctx = store.WithUserID(ctx, userID)
-		}
-		r = r.WithContext(ctx)
-		next(w, r)
-	}
+	return requireAuth(h.token, "", next)
 }
 
 // --- Server CRUD ---
@@ -115,7 +100,7 @@ func (h *MCPHandler) handleListServers(w http.ResponseWriter, r *http.Request) {
 		result[i] = mcpServerWithCounts{MCPServerData: srv, AgentCount: counts[srv.ID]}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"servers": result})
+	writeJSON(w, http.StatusOK, map[string]any{"servers": result})
 }
 
 func (h *MCPHandler) handleCreateServer(w http.ResponseWriter, r *http.Request) {
@@ -147,6 +132,7 @@ func (h *MCPHandler) handleCreateServer(w http.ResponseWriter, r *http.Request) 
 	}
 
 	h.emitCacheInvalidate()
+	emitAudit(h.msgBus, r, "mcp_server.created", "mcp_server", srv.ID.String())
 	writeJSON(w, http.StatusCreated, srv)
 }
 
@@ -175,7 +161,7 @@ func (h *MCPHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var updates map[string]interface{}
+	var updates map[string]any
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&updates); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidJSON)})
 		return
@@ -188,6 +174,9 @@ func (h *MCPHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// Allowlist: only permit known MCP server columns.
+	updates = filterAllowedKeys(updates, mcpServerAllowedFields)
+
 	if err := h.store.UpdateServer(r.Context(), id, updates); err != nil {
 		slog.Error("mcp.update_server", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -195,6 +184,7 @@ func (h *MCPHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request) 
 	}
 
 	h.emitCacheInvalidate()
+	emitAudit(h.msgBus, r, "mcp_server.updated", "mcp_server", id.String())
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -213,5 +203,6 @@ func (h *MCPHandler) handleDeleteServer(w http.ResponseWriter, r *http.Request) 
 	}
 
 	h.emitCacheInvalidate()
+	emitAudit(h.msgBus, r, "mcp_server.deleted", "mcp_server", id.String())
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"strconv"
 )
 
@@ -30,7 +31,9 @@ func (c *LarkClient) SendMessage(ctx context.Context, receiveIDType, receiveID, 
 		return nil, fmt.Errorf("send message: code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	var data SendMessageResp
-	json.Unmarshal(resp.Data, &data)
+	if err := json.Unmarshal(resp.Data, &data); err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
 	return &data, nil
 }
 
@@ -55,7 +58,9 @@ func (c *LarkClient) UploadImage(ctx context.Context, data io.Reader) (string, e
 	var result struct {
 		ImageKey string `json:"image_key"`
 	}
-	json.Unmarshal(resp.Data, &result)
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return "", fmt.Errorf("unmarshal response: %w", err)
+	}
 	return result.ImageKey, nil
 }
 
@@ -79,8 +84,46 @@ func (c *LarkClient) UploadFile(ctx context.Context, data io.Reader, fileName, f
 	var result struct {
 		FileKey string `json:"file_key"`
 	}
-	json.Unmarshal(resp.Data, &result)
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return "", fmt.Errorf("unmarshal response: %w", err)
+	}
 	return result.FileKey, nil
+}
+
+// --- IM API: Get Message ---
+
+// GetMessageResp holds the response from GET /open-apis/im/v1/messages/{message_id}.
+type GetMessageResp struct {
+	Items []struct {
+		MessageID   string `json:"message_id"`
+		MsgType     string `json:"msg_type"`
+		Body        struct {
+			Content string `json:"content"`
+		} `json:"body"`
+		Sender struct {
+			ID         string `json:"id"`
+			IDType     string `json:"id_type"`
+			SenderType string `json:"sender_type"`
+		} `json:"sender"`
+	} `json:"items"`
+}
+
+// GetMessage retrieves a message by ID.
+// Lark API: GET /open-apis/im/v1/messages/{message_id}
+func (c *LarkClient) GetMessage(ctx context.Context, messageID string) (*GetMessageResp, error) {
+	path := fmt.Sprintf("/open-apis/im/v1/messages/%s", messageID)
+	resp, err := c.doJSON(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Code != 0 {
+		return nil, fmt.Errorf("get message: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	var data GetMessageResp
+	if err := json.Unmarshal(resp.Data, &data); err != nil {
+		return nil, fmt.Errorf("unmarshal get message: %w", err)
+	}
+	return &data, nil
 }
 
 // --- IM API: Message Resources ---
@@ -106,7 +149,9 @@ func (c *LarkClient) CreateCard(ctx context.Context, cardType, data string) (str
 	var result struct {
 		CardID string `json:"card_id"`
 	}
-	json.Unmarshal(resp.Data, &result)
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return "", fmt.Errorf("unmarshal response: %w", err)
+	}
 	return result.CardID, nil
 }
 
@@ -165,7 +210,9 @@ func (c *LarkClient) AddMessageReaction(ctx context.Context, messageID, emojiTyp
 	var result struct {
 		ReactionID string `json:"reaction_id"`
 	}
-	json.Unmarshal(resp.Data, &result)
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return "", fmt.Errorf("unmarshal response: %w", err)
+	}
 	return result.ReactionID, nil
 }
 
@@ -200,8 +247,61 @@ func (c *LarkClient) GetBotInfo(ctx context.Context) (string, error) {
 			OpenID string `json:"open_id"`
 		} `json:"bot"`
 	}
-	json.Unmarshal(resp.Data, &result)
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return "", fmt.Errorf("unmarshal response: %w", err)
+	}
 	return result.Bot.OpenID, nil
+}
+
+// --- IM API: Chat Members ---
+
+// ChatMember represents a member of a Lark group chat.
+type ChatMember struct {
+	MemberID     string `json:"member_id"`
+	MemberIDType string `json:"member_id_type"`
+	Name         string `json:"name"`
+	TenantKey    string `json:"tenant_key"`
+}
+
+// ListChatMembers returns all members of a group chat, handling pagination automatically.
+// Lark API: GET /open-apis/im/v1/chats/{chat_id}/members
+// Requires scope: im:chat.members:read
+func (c *LarkClient) ListChatMembers(ctx context.Context, chatID string) ([]ChatMember, error) {
+	var all []ChatMember
+	pageToken := ""
+
+	for {
+		path := fmt.Sprintf("/open-apis/im/v1/chats/%s/members?member_id_type=open_id&page_size=100", url.PathEscape(chatID))
+		if pageToken != "" {
+			path += "&page_token=" + url.QueryEscape(pageToken)
+		}
+
+		resp, err := c.doJSON(ctx, "GET", path, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.Code != 0 {
+			return nil, fmt.Errorf("list chat members: code=%d msg=%s", resp.Code, resp.Msg)
+		}
+
+		var result struct {
+			Items     []ChatMember `json:"items"`
+			PageToken string       `json:"page_token"`
+			HasMore   bool         `json:"has_more"`
+		}
+		if err := json.Unmarshal(resp.Data, &result); err != nil {
+			return nil, fmt.Errorf("unmarshal response: %w", err)
+		}
+
+		all = append(all, result.Items...)
+
+		if !result.HasMore || result.PageToken == "" {
+			break
+		}
+		pageToken = result.PageToken
+	}
+
+	return all, nil
 }
 
 // --- Contact API ---
@@ -220,6 +320,8 @@ func (c *LarkClient) GetUser(ctx context.Context, userID, userIDType string) (st
 			Name string `json:"name"`
 		} `json:"user"`
 	}
-	json.Unmarshal(resp.Data, &result)
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return "", fmt.Errorf("unmarshal response: %w", err)
+	}
 	return result.User.Name, nil
 }

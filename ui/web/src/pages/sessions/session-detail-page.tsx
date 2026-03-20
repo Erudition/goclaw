@@ -16,7 +16,8 @@ import type { ChatMessage, AgentEventPayload, ToolStreamEntry } from "@/types/ch
 
 /** Check if a message is an internal system message (subagent results, cron, etc.) */
 function isSystemMessage(msg: ChatMessage): boolean {
-  return msg.content?.trimStart().startsWith("[System Message]") ?? false;
+  const c = msg.content?.trimStart() ?? "";
+  return c.startsWith("[System Message]") || c.startsWith("[System]");
 }
 
 /** Check if a message should be displayed */
@@ -136,7 +137,7 @@ export function SessionDetailPage({
               <div className="flex items-center gap-1">
                 <input
                   autoFocus
-                  className="h-7 rounded border bg-background px-2 text-sm font-medium outline-none focus:ring-1 focus:ring-ring"
+                  className="h-7 rounded border bg-background px-2 text-base md:text-sm font-medium outline-none focus:ring-1 focus:ring-ring"
                   value={titleDraft}
                   onChange={(e) => setTitleDraft(e.target.value)}
                   onKeyDown={(e) => {

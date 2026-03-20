@@ -115,7 +115,7 @@ func (m *mockSecretsStore) GetAll(_ context.Context) (map[string]string, error) 
 // --- helper ---
 
 func newTestOAuthHandler(token string) *OAuthHandler {
-	return NewOAuthHandler(token, newMockProviderStore(), newMockSecretsStore(), nil)
+	return NewOAuthHandler(token, newMockProviderStore(), newMockSecretsStore(), nil, nil)
 }
 
 // --- tests ---
@@ -133,7 +133,7 @@ func TestOAuthHandlerStatusNoToken(t *testing.T) {
 		t.Fatalf("status code = %d, want %d", w.Code, http.StatusOK)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	json.NewDecoder(w.Body).Decode(&result)
 
 	if result["authenticated"] != false {
@@ -228,7 +228,7 @@ func TestOAuthHandlerStartReturnsAuthURL(t *testing.T) {
 		t.Fatalf("status code = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	json.NewDecoder(w.Body).Decode(&result)
 
 	_, hasURL := result["auth_url"]

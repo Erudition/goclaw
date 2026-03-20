@@ -52,7 +52,7 @@ func (t *ListFilesTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"path": map[string]any{
 				"type":        "string",
-				"description": "Directory path to list (default: workspace root)",
+				"description": "Directory path (relative to workspace; omit for workspace root)",
 			},
 		},
 	}
@@ -88,7 +88,8 @@ func (t *ListFilesTool) Execute(ctx context.Context, args map[string]any) *Resul
 	if workspace == "" {
 		workspace = t.workspace
 	}
-	resolved, err := resolvePath(path, workspace, effectiveRestrict(ctx, t.restrict))
+	allowed := allowedWithTeamWorkspace(ctx, nil)
+	resolved, err := resolvePathWithAllowed(path, workspace, effectiveRestrict(ctx, t.restrict), allowed)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
@@ -99,15 +100,19 @@ func (t *ListFilesTool) Execute(ctx context.Context, args map[string]any) *Resul
 	entries, err := os.ReadDir(resolved)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return SilentResult(fmt.Sprintf("Directory does not exist: %s", path))
+			msg := fmt.Sprintf("Directory does not exist: %s", path)
+			if teamWs := ToolTeamWorkspaceFromCtx(ctx); teamWs != "" && !strings.HasPrefix(resolved, teamWs) {
+				msg += fmt.Sprintf("\nHint: try the team workspace path: list_files(path=\"%s/%s\")", teamWs, path)
+			}
+			return SilentResult(msg)
 		}
 		return ErrorResult(fmt.Sprintf("failed to list directory: %v", err))
 	}
 
 	var sb strings.Builder
 	for _, entry := range entries {
-		// Filter out denied directories from listing
-		if entry.IsDir() && len(t.deniedPrefixes) > 0 {
+		// Filter out denied entries (both files and directories) from listing.
+		if len(t.deniedPrefixes) > 0 {
 			entryPath := filepath.Join(resolved, entry.Name())
 			if checkDeniedPath(entryPath, t.workspace, t.deniedPrefixes) != nil {
 				continue
@@ -128,48 +133,29 @@ func (t *ListFilesTool) Execute(ctx context.Context, args map[string]any) *Resul
 }
 
 func (t *ListFilesTool) executeInSandbox(ctx context.Context, path, sandboxKey string) *Result {
-	// Map effective workspace to container path
-	workspace := ToolWorkspaceFromCtx(ctx)
-	if workspace == "" {
-		workspace = t.workspace
-	}
-
-	containerCwd, err := MapHostPathToSandbox(ctx, workspace, t.workspace)
-	if err != nil {
-		return ErrorResult(fmt.Sprintf("sandbox list: %v", err))
-	}
-
-	// Resolve the requested 'path' relative to the agent's container workdir.
-	// FsBridge.ListDir expects either a relative path or an absolute path inside the workdir.
-	containerPath := path
-	if !filepath.IsAbs(path) {
-		containerPath = filepath.Join(containerCwd, path)
-	}
-
 	bridge, err := t.getFsBridge(ctx, sandboxKey)
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("sandbox error: %v", err))
 	}
 
+	containerCwd, cwdErr := SandboxCwd(ctx, t.workspace, sandbox.DefaultContainerWorkdir)
+	if cwdErr != nil {
+		return ErrorResult(fmt.Sprintf("sandbox path mapping: %v", cwdErr))
+	}
+	containerPath := ResolveSandboxPath(path, containerCwd)
+
 	output, err := bridge.ListDir(ctx, containerPath)
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("failed to list directory: %v", err))
+		return ErrorResult(fmt.Sprintf("failed to list directory: %v", err) + MaybeFsBridgeHint(err))
 	}
 
 	return SilentResult(output)
 }
 
 func (t *ListFilesTool) getFsBridge(ctx context.Context, sandboxKey string) (*sandbox.FsBridge, error) {
-	if netEnabled := ToolSandboxNetworkFromCtx(ctx); netEnabled {
-		ctx = sandbox.WithNetworkOverride(ctx, true)
-	}
 	sb, err := t.sandboxMgr.Get(ctx, sandboxKey, t.workspace, SandboxConfigFromCtx(ctx))
 	if err != nil {
 		return nil, err
 	}
-	containerDir := ToolSandboxDirFromCtx(ctx)
-	if containerDir == "" {
-		containerDir = "/workspace" // fallback
-	}
-	return sandbox.NewFsBridge(sb.ID(), containerDir), nil
+	return sandbox.NewFsBridge(sb.ID(), sandbox.DefaultContainerWorkdir), nil
 }

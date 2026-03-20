@@ -29,20 +29,25 @@ func (h *FilesHandler) RegisterRoutes(mux *http.ServeMux) {
 
 func (h *FilesHandler) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h.token != "" {
-			// Accept token via Bearer header or ?token= query param (for <img src>).
-			provided := extractBearerToken(r)
-			if provided == "" {
-				provided = r.URL.Query().Get("token")
-			}
-			if provided != h.token {
-				locale := extractLocale(r)
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": i18n.T(locale, i18n.MsgUnauthorized)})
-				return
-			}
+		// Accept token via Bearer header or ?token= query param (for <img src>).
+		provided := extractBearerToken(r)
+		if provided == "" {
+			provided = r.URL.Query().Get("token")
+		}
+		if !requireAuthBearer(h.token, "", provided, w, r) {
+			return
 		}
 		next(w, r)
 	}
+}
+
+// deniedFilePrefixes blocks access to sensitive system directories.
+// Defense-in-depth: the auth token is the primary barrier, but restricting
+// known-sensitive paths limits damage if a token leaks.
+var deniedFilePrefixes = []string{
+	"/etc/", "/proc/", "/sys/", "/dev/",
+	"/root/", "/boot/", "/run/",
+	"/var/run/", "/var/log/",
 }
 
 func (h *FilesHandler) handleServe(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +67,15 @@ func (h *FilesHandler) handleServe(w http.ResponseWriter, r *http.Request) {
 
 	// URL path is the absolute path with leading "/" stripped (e.g. "app/.goclaw/workspace/file.png")
 	absPath := filepath.Clean("/" + urlPath)
+
+	// Block access to sensitive system directories
+	for _, prefix := range deniedFilePrefixes {
+		if strings.HasPrefix(absPath, prefix) {
+			slog.Warn("security.files_denied_path", "path", absPath)
+			http.Error(w, i18n.T(locale, i18n.MsgInvalidPath), http.StatusForbidden)
+			return
+		}
+	}
 
 	info, err := os.Stat(absPath)
 	if err != nil || info.IsDir() {

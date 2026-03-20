@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ type HistoryEntry struct {
 	Sender    string
 	SenderID  string
 	Body      string
+	Media     []string // temp file paths for images/attachments (RAM-only, not persisted to DB)
 	Timestamp time.Time
 	MessageID string
 }
@@ -122,6 +124,8 @@ func (ph *PendingHistory) Record(historyKey string, entry HistoryEntry, limit in
 	existing = append(existing, entry)
 	count = len(existing) // capture pre-trim count so MaybeCompact sees threshold exceeded
 	if len(existing) > limit {
+		trimmed := existing[:len(existing)-limit]
+		go cleanupMedia(trimmed)
 		existing = existing[len(existing)-limit:]
 	}
 	ph.entries[historyKey] = existing
@@ -147,6 +151,51 @@ func (ph *PendingHistory) Record(historyKey string, entry HistoryEntry, limit in
 	ph.MaybeCompact(historyKey, count, ph.compactionCfg)
 }
 
+// loadFromDB fetches pending messages from DB for a single historyKey,
+// populates RAM cache, and returns converted entries.
+// Called when RAM has no entries but DB store is available.
+func (ph *PendingHistory) loadFromDB(historyKey string) []HistoryEntry {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	msgs, err := ph.store.ListByKey(ctx, ph.channelName, historyKey)
+	if err != nil {
+		slog.Warn("pending_history.db_fallback_failed",
+			"channel", ph.channelName, "key", historyKey, "error", err)
+		return nil
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+
+	entries := make([]HistoryEntry, 0, len(msgs))
+	for _, m := range msgs {
+		entries = append(entries, HistoryEntry{
+			Sender:    m.Sender,
+			SenderID:  m.SenderID,
+			Body:      m.Body,
+			Timestamp: m.CreatedAt,
+			MessageID: m.PlatformMsgID,
+		})
+	}
+
+	// Populate RAM cache (double-check under lock to not overwrite concurrent Record())
+	ph.mu.Lock()
+	if len(ph.entries[historyKey]) == 0 {
+		ph.entries[historyKey] = entries
+		ph.removeFromOrder(historyKey)
+		ph.order = append(ph.order, historyKey)
+		ph.evictOldKeys()
+	} else {
+		// Another goroutine populated meanwhile — use the fresher RAM data
+		entries = make([]HistoryEntry, len(ph.entries[historyKey]))
+		copy(entries, ph.entries[historyKey])
+	}
+	ph.mu.Unlock()
+
+	return entries
+}
+
 // BuildContext retrieves pending history for a group and formats it as context
 // to prepend to the current message.
 func (ph *PendingHistory) BuildContext(historyKey, currentMessage string, limit int) string {
@@ -159,6 +208,12 @@ func (ph *PendingHistory) BuildContext(historyKey, currentMessage string, limit 
 	entriesCopy := make([]HistoryEntry, len(entries))
 	copy(entriesCopy, entries)
 	ph.mu.Unlock()
+
+	// DB fallback: if RAM is empty but we have a DB store, load from DB.
+	// Handles post-restart and LRU-eviction scenarios.
+	if len(entriesCopy) == 0 && ph.store != nil {
+		entriesCopy = ph.loadFromDB(historyKey)
+	}
 
 	if len(entriesCopy) == 0 {
 		return currentMessage
@@ -178,15 +233,20 @@ func (ph *PendingHistory) BuildContext(historyKey, currentMessage string, limit 
 }
 
 // GetEntries returns a copy of pending entries for a group.
+// Falls back to DB when RAM is empty (post-restart / LRU eviction).
 func (ph *PendingHistory) GetEntries(historyKey string) []HistoryEntry {
 	ph.mu.Lock()
-	defer ph.mu.Unlock()
 	entries := ph.entries[historyKey]
 	if len(entries) == 0 {
+		ph.mu.Unlock()
+		if ph.store != nil {
+			return ph.loadFromDB(historyKey)
+		}
 		return nil
 	}
 	result := make([]HistoryEntry, len(entries))
 	copy(result, entries)
+	ph.mu.Unlock()
 	return result
 }
 
@@ -198,9 +258,13 @@ func (ph *PendingHistory) Clear(historyKey string) {
 	}
 
 	ph.mu.Lock()
+	toClean := ph.entries[historyKey]
 	delete(ph.entries, historyKey)
 	ph.removeFromOrder(historyKey)
 	ph.mu.Unlock()
+
+	// Clean up any remaining media temp files (after CollectMedia took what it needed).
+	go cleanupMedia(toClean)
 
 	if ph.store != nil {
 		// Remove pending flushes for this key
@@ -229,6 +293,34 @@ func (ph *PendingHistory) evictOldKeys() {
 	for len(ph.order) > maxHistoryKeys {
 		oldest := ph.order[0]
 		ph.order = ph.order[1:]
+		evicted := ph.entries[oldest]
 		delete(ph.entries, oldest)
+		go cleanupMedia(evicted)
+	}
+}
+
+// CollectMedia returns all media file paths from pending entries for a history key
+// and removes them from the entries to prevent double-cleanup by Clear().
+func (ph *PendingHistory) CollectMedia(historyKey string) []string {
+	ph.mu.Lock()
+	defer ph.mu.Unlock()
+
+	entries := ph.entries[historyKey]
+	var paths []string
+	for i := range entries {
+		paths = append(paths, entries[i].Media...)
+		entries[i].Media = nil // prevent double-cleanup
+	}
+	return paths
+}
+
+// cleanupMedia removes temp files from history entries. Best-effort, logs warnings.
+func cleanupMedia(entries []HistoryEntry) {
+	for _, e := range entries {
+		for _, path := range e.Media {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				slog.Warn("pending_history: media cleanup failed", "path", path, "error", err)
+			}
+		}
 	}
 }

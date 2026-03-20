@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
@@ -39,6 +40,31 @@ func (l *Loop) scanWebToolResult(toolName string, result *tools.Result) {
 	}
 }
 
+// shouldShareWorkspace checks if the given user should share the base workspace
+// directory (skip per-user subfolder isolation) based on workspace_sharing config.
+func (l *Loop) shouldShareWorkspace(userID, peerKind string) bool {
+	ws := l.workspaceSharing
+	if ws == nil {
+		return false
+	}
+	if slices.Contains(ws.SharedUsers, userID) {
+		return true
+	}
+	switch peerKind {
+	case "direct":
+		return ws.SharedDM
+	case "group":
+		return ws.SharedGroup
+	}
+	return false
+}
+
+// shouldShareMemory returns true if memory/KG should be shared across all users.
+// Independent of workspace folder sharing.
+func (l *Loop) shouldShareMemory() bool {
+	return l.workspaceSharing != nil && l.workspaceSharing.ShareMemory
+}
+
 // InvalidateUserWorkspace clears the cached workspace for a user,
 // forcing the next request to re-read from user_agent_profiles.
 func (l *Loop) InvalidateUserWorkspace(userID string) {
@@ -55,4 +81,31 @@ func (l *Loop) ProviderName() string {
 		return ""
 	}
 	return l.provider.Name()
+}
+
+// uniquifyToolCallIDs ensures all tool call IDs are globally unique across the
+// transcript by appending a short run-ID prefix and iteration index.
+// Returns a new slice (does not mutate the input).
+//
+// Some OpenAI-compatible APIs (OpenRouter, vLLM, DeepSeek) return duplicate IDs
+// within a single response or reuse IDs from earlier turns, causing HTTP 400.
+// Using the run UUID guarantees cross-turn uniqueness without history rewriting.
+func uniquifyToolCallIDs(calls []providers.ToolCall, runID string, iteration int) []providers.ToolCall {
+	if len(calls) == 0 {
+		return calls
+	}
+	short := runID
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	out := make([]providers.ToolCall, len(calls))
+	copy(out, calls)
+	for i := range out {
+		if out[i].ID == "" {
+			out[i].ID = fmt.Sprintf("call_%s_%d_%d", short, iteration, i)
+		} else {
+			out[i].ID = fmt.Sprintf("%s_%s_%d_%d", out[i].ID, short, iteration, i)
+		}
+	}
+	return out
 }

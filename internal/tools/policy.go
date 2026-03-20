@@ -3,10 +3,14 @@ package tools
 import (
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
+
+// toolGroupsMu protects toolGroups from concurrent access.
+var toolGroupsMu sync.RWMutex
 
 // Tool groups map group names to tool names.
 var toolGroups = map[string][]string{
@@ -17,20 +21,18 @@ var toolGroups = map[string][]string{
 	"sessions":   {"sessions_list", "sessions_history", "sessions_send", "spawn", "session_status"},
 	"ui":         {"browser"},
 	"automation": {"cron"},
-	"messaging":  {"message", "create_forum_topic"},
-	"delegation": {"handoff", "delegate_search", "evaluate_loop"},
-	"team":       {"team_tasks", "team_message"},
+	"messaging":  {"message", "create_forum_topic", "list_group_members"},
+	"team": {"team_tasks", "team_message"},
 	// Composite group: all goclaw native tools (excludes MCP/custom plugins).
 	"goclaw": {
 		"read_file", "write_file", "list_files", "edit", "exec",
 		"web_search", "web_fetch", "browser",
 		"memory_search", "memory_get",
 		"sessions_list", "sessions_history", "sessions_send", "spawn", "session_status",
-		"cron", "message", "create_forum_topic",
+		"cron", "message", "create_forum_topic", "list_group_members",
 		"read_image", "read_document", "read_audio", "read_video",
 		"create_image", "create_video",
 		"skill_search", "mcp_tool_search", "tts",
-		"handoff", "delegate_search", "evaluate_loop",
 		"team_tasks", "team_message",
 	},
 }
@@ -38,12 +40,16 @@ var toolGroups = map[string][]string{
 // RegisterToolGroup adds or replaces a dynamic tool group.
 // Used by the MCP manager to register "mcp" and "mcp:{serverName}" groups.
 func RegisterToolGroup(name string, members []string) {
+	toolGroupsMu.Lock()
 	toolGroups[name] = members
+	toolGroupsMu.Unlock()
 }
 
 // UnregisterToolGroup removes a dynamic tool group.
 func UnregisterToolGroup(name string) {
+	toolGroupsMu.Lock()
 	delete(toolGroups, name)
+	toolGroupsMu.Unlock()
 }
 
 // Tool profiles define preset allow sets.
@@ -241,6 +247,9 @@ func (pe *PolicyEngine) applyProfile(allTools []string, profile string) []string
 // expandSpec expands a spec list (which may contain "group:xxx") into concrete tool names,
 // filtered against available tools.
 func expandSpec(available []string, spec []string) []string {
+	toolGroupsMu.RLock()
+	defer toolGroupsMu.RUnlock()
+
 	expanded := make(map[string]bool)
 	for _, s := range spec {
 		if after, ok := strings.CutPrefix(s, "group:"); ok {
@@ -266,6 +275,9 @@ func expandSpec(available []string, spec []string) []string {
 
 // intersectWithSpec keeps only tools in `current` that match the spec (with group expansion).
 func intersectWithSpec(current []string, spec []string) []string {
+	toolGroupsMu.RLock()
+	defer toolGroupsMu.RUnlock()
+
 	expanded := make(map[string]bool)
 	for _, s := range spec {
 		if after, ok := strings.CutPrefix(s, "group:"); ok {
@@ -291,6 +303,9 @@ func intersectWithSpec(current []string, spec []string) []string {
 
 // subtractSpec removes tools matching the spec (with group expansion) from current.
 func subtractSpec(current []string, spec []string) []string {
+	toolGroupsMu.RLock()
+	defer toolGroupsMu.RUnlock()
+
 	denied := make(map[string]bool)
 	for _, s := range spec {
 		if after, ok := strings.CutPrefix(s, "group:"); ok {
@@ -344,6 +359,76 @@ func unionWithSpec(current []string, allTools []string, spec []string) []string 
 		}
 	}
 	return current
+}
+
+// IsDenied checks if a tool name is explicitly denied by global or agent policy.
+// Used to prevent lazy-activated deferred tools from bypassing the deny list.
+func (pe *PolicyEngine) IsDenied(name string, agentPolicy *config.ToolPolicySpec) bool {
+	if pe.globalPolicy != nil {
+		if matchDenySpec(name, pe.globalPolicy.Deny) {
+			return true
+		}
+	}
+	if agentPolicy != nil {
+		if matchDenySpec(name, agentPolicy.Deny) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchDenySpec returns true if name matches any entry in the deny spec (with group expansion).
+func matchDenySpec(name string, spec []string) bool {
+	toolGroupsMu.RLock()
+	defer toolGroupsMu.RUnlock()
+
+	for _, s := range spec {
+		if after, ok := strings.CutPrefix(s, "group:"); ok {
+			if members, ok := toolGroups[after]; ok {
+				for _, m := range members {
+					if m == name {
+						return true
+					}
+				}
+			}
+		} else if s == name {
+			return true
+		}
+	}
+	return false
+}
+
+// StripToolPrefix removes a prefix pattern from a tool name returned by the LLM.
+// The template uses {tool_name} as placeholder. Example: template "proxy_{tool_name}"
+// strips "proxy_" from "proxy_exec" → "exec".
+// If template has no {tool_name}, it's treated as a literal prefix to strip.
+func StripToolPrefix(tmpl, name string) string {
+	const placeholder = "{tool_name}"
+	if strings.Contains(tmpl, placeholder) {
+		parts := strings.SplitN(tmpl, placeholder, 2)
+		prefix, suffix := parts[0], parts[1]
+		if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, suffix) {
+			result := name[len(prefix):]
+			if suffix != "" {
+				result = result[:len(result)-len(suffix)]
+			}
+			if result != "" {
+				return result
+			}
+		}
+		return name
+	}
+	// Plain prefix: strip literal prefix and any leading underscore separator
+	stripped := strings.TrimPrefix(name, tmpl)
+	if stripped == name {
+		return name // prefix didn't match
+	}
+	stripped = strings.TrimPrefix(stripped, "_")
+	if stripped == "" {
+		return name // nothing left after stripping
+	}
+	slog.Debug("tool_prefix.stripped", "from", name, "to", stripped, "template", tmpl)
+	return stripped
 }
 
 func resolveAlias(name string) string {

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -11,8 +12,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
+	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
 // filteredToolNames returns tool names after applying policy filters.
@@ -27,6 +30,19 @@ func (l *Loop) filteredToolNames() []string {
 		names[i] = d.Function.Name
 	}
 	return names
+}
+
+// buildCredentialCLIContext generates the TOOLS.md supplement for credentialed CLIs.
+// Returns empty string if no secure CLI store is configured or no enabled CLIs.
+func (l *Loop) buildCredentialCLIContext(ctx context.Context) string {
+	if l.secureCLIStore == nil {
+		return ""
+	}
+	creds, err := l.secureCLIStore.ListEnabled(ctx)
+	if err != nil || len(creds) == 0 {
+		return ""
+	}
+	return tools.GenerateCredentialContext(creds)
 }
 
 // buildMCPToolDescs extracts real descriptions for MCP tools from the registry.
@@ -50,33 +66,43 @@ func (l *Loop) buildMCPToolDescs(toolNames []string) map[string]string {
 // buildMessages constructs the full message list for an LLM request.
 // Returns the messages and whether BOOTSTRAP.md was present in context files
 // (used by the caller for auto-cleanup without an extra DB roundtrip).
-func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, summary, userMessage, extraSystemPrompt, sessionKey, channel, channelType, peerKind, userID string, historyLimit int, skillFilter []string) ([]providers.Message, bool) {
+func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, summary, userMessage, extraSystemPrompt, sessionKey, channel, channelType, peerKind, userID string, historyLimit int, skillFilter []string, lightContext bool) ([]providers.Message, bool) {
 	var messages []providers.Message
 
 	// Build full system prompt using the new builder (matching TS buildAgentSystemPrompt)
 	mode := PromptFull
-	if bootstrap.IsSubagentSession(sessionKey) || bootstrap.IsCronSession(sessionKey) {
+	if bootstrap.IsSubagentSession(sessionKey) || bootstrap.IsCronSession(sessionKey) || bootstrap.IsHeartbeatSession(sessionKey) {
 		mode = PromptMinimal
 	}
 
 	_, hasSpawn := l.tools.Get("spawn")
+	_, hasTeamTools := l.tools.Get("team_tasks")
 	_, hasSkillSearch := l.tools.Get("skill_search")
+	_, hasSkillManage := l.tools.Get("skill_manage")
 	_, hasMCPToolSearch := l.tools.Get("mcp_tool_search")
 	_, hasKG := l.tools.Get("knowledge_graph_search")
 
 	// Per-user workspace: show the user's subdirectory in the system prompt.
 	// Uses cached workspace from user_agent_profiles (includes channel isolation).
+	// When workspace sharing is enabled, show the base workspace without user subfolder.
 	promptWorkspace := l.workspace
 	if l.agentUUID != uuid.Nil && userID != "" && l.workspace != "" {
 		if cachedWs, ok := l.userWorkspaces.Load(userID); ok {
-			promptWorkspace = filepath.Join(cachedWs.(string), sanitizePathSegment(userID))
-		} else {
+			promptWorkspace = cachedWs.(string)
+			if !l.shouldShareWorkspace(userID, peerKind) {
+				promptWorkspace = filepath.Join(promptWorkspace, sanitizePathSegment(userID))
+			}
+		} else if !l.shouldShareWorkspace(userID, peerKind) {
 			promptWorkspace = filepath.Join(l.workspace, sanitizePathSegment(userID))
 		}
 	}
 
 	// Resolve context files once — also detect BOOTSTRAP.md presence.
-	contextFiles := l.resolveContextFiles(ctx, userID)
+	// lightContext: skip loading context files, only inject ExtraSystemPrompt (heartbeat checklist).
+	var contextFiles []bootstrap.ContextFile
+	if !lightContext {
+		contextFiles = l.resolveContextFiles(ctx, userID)
+	}
 	hadBootstrap := false
 	for _, cf := range contextFiles {
 		if cf.Path == bootstrap.BootstrapFile {
@@ -85,8 +111,22 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		}
 	}
 
+	// Bootstrap mode: group chats and team-dispatched sessions skip onboarding entirely;
+	// only DMs enter minimal bootstrap mode.
+	if hadBootstrap && (peerKind == "group" || bootstrap.IsTeamSession(sessionKey)) {
+		// Filter BOOTSTRAP.md from context files — groups/team tasks don't need onboarding.
+		filtered := make([]bootstrap.ContextFile, 0, len(contextFiles))
+		for _, cf := range contextFiles {
+			if cf.Path != bootstrap.BootstrapFile {
+				filtered = append(filtered, cf)
+			}
+		}
+		contextFiles = filtered
+		hadBootstrap = false
+	}
+
 	// Group writer restrictions: filter context files + inject prompt
-	if l.groupWriterCache != nil && strings.HasPrefix(userID, "group:") {
+	if l.configPermStore != nil && (strings.HasPrefix(userID, "group:") || strings.HasPrefix(userID, "guild:")) {
 		senderID := store.SenderIDFromContext(ctx)
 		writerPrompt, filtered := l.buildGroupWriterPrompt(ctx, userID, senderID, contextFiles)
 		contextFiles = filtered
@@ -98,11 +138,35 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		}
 	}
 
-	// Build MCP tool descriptions for inline mode (not search mode).
+	// Build tool list, filtering out skill_manage when skill_evolve is off.
 	toolNames := l.filteredToolNames()
+	if !l.skillEvolve {
+		filtered := toolNames[:0:0]
+		for _, n := range toolNames {
+			if n != "skill_manage" {
+				filtered = append(filtered, n)
+			}
+		}
+		toolNames = filtered
+	}
 	var mcpToolDescs map[string]string
 	if !hasMCPToolSearch {
 		mcpToolDescs = l.buildMCPToolDescs(toolNames)
+	}
+
+	// Bootstrap DM mode: only restrict tools for open agents (identity being created).
+	// Predefined agents keep full capabilities — BOOTSTRAP.md guides behavior.
+	if hadBootstrap && l.agentType != store.AgentTypePredefined {
+		toolNames = filterBootstrapTools(toolNames)
+		mcpToolDescs = nil
+	}
+
+	// Resolve team members so agent knows who to assign tasks to.
+	var teamMembers []store.TeamMemberData
+	if hasTeamTools && l.teamStore != nil && l.agentUUID != uuid.Nil {
+		if team, _ := l.teamStore.GetTeamForAgent(ctx, l.agentUUID); team != nil {
+			teamMembers, _ = l.teamStore.ListMembers(ctx, team.ID)
+		}
 	}
 
 	systemPrompt := BuildSystemPrompt(SystemPromptConfig{
@@ -118,7 +182,11 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		SkillsSummary:          l.resolveSkillsSummary(skillFilter),
 		HasMemory:              l.hasMemory,
 		HasSpawn:               l.tools != nil && hasSpawn,
+		HasTeam:                hasTeamTools,
+		TeamWorkspace:          tools.ToolTeamWorkspaceFromCtx(ctx),
+		TeamMembers:            teamMembers,
 		HasSkillSearch:         hasSkillSearch,
+		HasSkillManage:         l.skillEvolve && hasSkillManage,
 		HasMCPToolSearch:       hasMCPToolSearch,
 		HasKnowledgeGraph:      hasKG,
 		MCPToolDescs:           mcpToolDescs,
@@ -128,7 +196,10 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		SandboxEnabled:         l.sandboxEnabled,
 		SandboxContainerDir:    l.sandboxContainerDir,
 		SandboxWorkspaceAccess: l.sandboxWorkspaceAccess,
+		ShellDenyGroups:        l.shellDenyGroups,
 		SelfEvolve:             l.selfEvolve,
+		CredentialCLIContext:   l.buildCredentialCLIContext(ctx),
+		IsBootstrap:            hadBootstrap && l.agentType != store.AgentTypePredefined,
 	})
 
 	messages = append(messages, providers.Message{
@@ -203,12 +274,30 @@ func (l *Loop) resolveContextFiles(ctx context.Context, userID string) []bootstr
 	return merged
 }
 
+// bootstrapToolAllowlist is the set of tools available during bootstrap onboarding.
+// Only write_file (and its alias Write) are needed to save USER.md and clear BOOTSTRAP.md.
+var bootstrapToolAllowlist = map[string]bool{
+	"write_file": true,
+	"Write":      true,
+}
+
+// filterBootstrapTools returns only the bootstrap-allowed tools from the full tool list.
+func filterBootstrapTools(toolNames []string) []string {
+	var filtered []string
+	for _, name := range toolNames {
+		if bootstrapToolAllowlist[name] {
+			filtered = append(filtered, name)
+		}
+	}
+	return filtered
+}
+
 // Hybrid skill thresholds: when skill count and total token estimate are below
 // these limits, inline all skills as XML in the system prompt (like TS).
 // Above these limits, only include skill_search instructions.
 const (
-	skillInlineMaxCount  = 20   // max skills to inline
-	skillInlineMaxTokens = 3500 // max estimated tokens for skill descriptions
+	skillInlineMaxCount  = 40   // max skills to inline
+	skillInlineMaxTokens = 5000 // max estimated tokens for skill descriptions
 )
 
 // resolveSkillsSummary dynamically builds the skills summary for the system prompt.
@@ -281,7 +370,8 @@ func limitHistoryTurns(msgs []providers.Message, limit int) []providers.Message 
 //   - Orphaned tool messages at start of history (after truncation)
 //   - tool_result without matching tool_use in preceding assistant message
 //   - assistant with tool_calls but missing tool_results
-// sanitizeHistory repairs tool_use/tool_result pairing in session history.
+//   - Duplicate tool call IDs across turns (legacy sessions before uniquifyToolCallIDs)
+//
 // Returns the cleaned messages and the number of messages that were dropped or synthesized.
 func sanitizeHistory(msgs []providers.Message) ([]providers.Message, int) {
 	if len(msgs) == 0 {
@@ -304,15 +394,36 @@ func sanitizeHistory(msgs []providers.Message) ([]providers.Message, int) {
 	}
 
 	// 2. Walk through messages ensuring tool_result follows matching tool_use.
+	// Also dedup tool call IDs across the transcript for legacy sessions that
+	// may have persisted duplicates before the live uniquify fix was deployed.
 	var result []providers.Message
+	globalSeen := make(map[string]bool) // tracks IDs seen across entire transcript
+
 	for i := start; i < len(msgs); i++ {
 		msg := msgs[i]
 
 		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
-			// Collect expected tool call IDs
+			// Deep-copy ToolCalls to avoid mutating the original session history.
+			oldCalls := msg.ToolCalls
+			msg.ToolCalls = make([]providers.ToolCall, len(oldCalls))
+			copy(msg.ToolCalls, oldCalls)
+
+			// Dedup: rewrite any ID that was already seen in an earlier turn or
+			// within the same turn. Uses a queue per original ID so multiple tool
+			// results with the same raw ID pair correctly in encounter order.
+			idQueue := make(map[string][]string, len(msg.ToolCalls)) // origID → []newID
 			expectedIDs := make(map[string]bool, len(msg.ToolCalls))
-			for _, tc := range msg.ToolCalls {
-				expectedIDs[tc.ID] = true
+			for j := range msg.ToolCalls {
+				origID := msg.ToolCalls[j].ID
+				newID := origID
+				if globalSeen[origID] {
+					newID = fmt.Sprintf("%s_dedup_%d", origID, j)
+					slog.Debug("sanitizeHistory: dedup tool call ID", "orig", origID, "new", newID)
+				}
+				msg.ToolCalls[j].ID = newID
+				globalSeen[newID] = true
+				idQueue[origID] = append(idQueue[origID], newID)
+				expectedIDs[newID] = true
 			}
 
 			result = append(result, msg)
@@ -321,9 +432,12 @@ func sanitizeHistory(msgs []providers.Message) ([]providers.Message, int) {
 			for i+1 < len(msgs) && msgs[i+1].Role == "tool" {
 				i++
 				toolMsg := msgs[i]
-				if expectedIDs[toolMsg.ToolCallID] {
+				if queue, ok := idQueue[toolMsg.ToolCallID]; ok && len(queue) > 0 {
+					newID := queue[0]
+					idQueue[toolMsg.ToolCallID] = queue[1:]
+					toolMsg.ToolCallID = newID
 					result = append(result, toolMsg)
-					delete(expectedIDs, toolMsg.ToolCallID)
+					delete(expectedIDs, newID)
 				} else {
 					slog.Debug("sanitizeHistory: dropping mismatched tool result",
 						"tool_call_id", toolMsg.ToolCallID)
@@ -332,14 +446,16 @@ func sanitizeHistory(msgs []providers.Message) ([]providers.Message, int) {
 			}
 
 			// Synthesize missing tool results
-			for id := range expectedIDs {
-				slog.Debug("sanitizeHistory: synthesizing missing tool result", "tool_call_id", id)
-				result = append(result, providers.Message{
-					Role:       "tool",
-					Content:    "[Tool result missing — session was compacted]",
-					ToolCallID: id,
-				})
-				dropped++
+			for _, tc := range msg.ToolCalls {
+				if expectedIDs[tc.ID] {
+					slog.Debug("sanitizeHistory: synthesizing missing tool result", "tool_call_id", tc.ID)
+					result = append(result, providers.Message{
+						Role:       "tool",
+						Content:    "[Tool result missing — session was compacted]",
+						ToolCallID: tc.ID,
+					})
+					dropped++
+				}
 			}
 		} else if msg.Role == "tool" {
 			// Orphaned tool message mid-history (no preceding assistant with matching tool_calls)
@@ -362,7 +478,7 @@ func (l *Loop) maybeSummarize(ctx context.Context, sessionKey string) {
 	tokenEstimate := EstimateTokensWithCalibration(history, lastPT, lastMC)
 
 	// Resolve compaction thresholds from config with sensible defaults.
-	historyShare := 0.75
+	historyShare := config.DefaultHistoryShare
 	if l.compactionCfg != nil && l.compactionCfg.MaxHistoryShare > 0 {
 		historyShare = l.compactionCfg.MaxHistoryShare
 	}
@@ -473,7 +589,7 @@ func (l *Loop) maybeSummarize(ctx context.Context, sessionKey string) {
 // buildGroupWriterPrompt builds the system prompt section for group file writer restrictions.
 // For non-writers: injects refusal instructions + removes SOUL.md/AGENTS.md from context files.
 func (l *Loop) buildGroupWriterPrompt(ctx context.Context, groupID, senderID string, files []bootstrap.ContextFile) (string, []bootstrap.ContextFile) {
-	writers, err := l.groupWriterCache.ListWriters(ctx, l.agentUUID, groupID)
+	writers, err := l.configPermStore.ListFileWriters(ctx, l.agentUUID, groupID)
 	if err != nil || len(writers) == 0 {
 		return "", files // fail-open
 	}
@@ -498,13 +614,19 @@ func (l *Loop) buildGroupWriterPrompt(ctx context.Context, groupID, senderID str
 		}
 	}
 
-	// Build writer display names
+	// Build writer display names from metadata JSON
+	type fwMeta struct {
+		DisplayName string `json:"displayName"`
+		Username    string `json:"username"`
+	}
 	var names []string
 	for _, w := range writers {
-		if w.Username != nil && *w.Username != "" {
-			names = append(names, "@"+*w.Username)
-		} else if w.DisplayName != nil && *w.DisplayName != "" {
-			names = append(names, *w.DisplayName)
+		var meta fwMeta
+		_ = json.Unmarshal(w.Metadata, &meta)
+		if meta.Username != "" {
+			names = append(names, "@"+meta.Username)
+		} else if meta.DisplayName != "" {
+			names = append(names, meta.DisplayName)
 		}
 	}
 

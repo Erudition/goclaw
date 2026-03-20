@@ -38,7 +38,7 @@ func (h *AgentsHandler) handleListInstances(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"instances": instances})
+	writeJSON(w, http.StatusOK, map[string]any{"instances": instances})
 }
 
 // handleGetInstanceFiles returns user context files for a specific instance.
@@ -72,7 +72,7 @@ func (h *AgentsHandler) handleGetInstanceFiles(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"files": files})
+	writeJSON(w, http.StatusOK, map[string]any{"files": files})
 }
 
 // handleSetInstanceFile updates a user context file for a specific instance.
@@ -134,6 +134,7 @@ func (h *AgentsHandler) handleSetInstanceFile(w http.ResponseWriter, r *http.Req
 	// Invalidate caches so the agent picks up the change immediately
 	h.emitCacheInvalidate(bus.CacheKindBootstrap, id.String())
 
+	emitAudit(h.msgBus, r, "agent_instance.file_set", "agent_instance", id.String())
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -184,5 +185,6 @@ func (h *AgentsHandler) handleUpdateInstanceMetadata(w http.ResponseWriter, r *h
 		return
 	}
 
+	emitAudit(h.msgBus, r, "agent_instance.metadata_updated", "agent_instance", id.String())
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }

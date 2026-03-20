@@ -30,7 +30,7 @@ func (sm *SubagentManager) applyDenyList(reg *Registry, depth int, cfg SubagentC
 
 // buildSubagentSystemPrompt constructs the system prompt for a subagent,
 // matching the TS buildSubagentSystemPrompt pattern from subagent-announce.ts.
-func (sm *SubagentManager) buildSubagentSystemPrompt(task *SubagentTask, cfg SubagentConfig) string {
+func (sm *SubagentManager) buildSubagentSystemPrompt(task *SubagentTask, cfg SubagentConfig, workspace string) string {
 	parentLabel := "main agent"
 	if task.Depth >= 2 {
 		parentLabel = "parent orchestrator"
@@ -87,6 +87,14 @@ You are a leaf worker and CANNOT spawn further sub-agents. Focus on your assigne
 ## Session Context
 - Label: %s
 - Depth: %d / %d`, task.Label, task.Depth, cfg.MaxSpawnDepth)
+
+	if workspace != "" {
+		prompt += fmt.Sprintf(`
+
+## Workspace
+Your working directory is: %s
+Use relative paths for file operations — do not guess absolute paths.`, workspace)
+	}
 
 	return prompt
 }

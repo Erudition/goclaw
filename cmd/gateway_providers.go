@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/oauth"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
 // loopbackAddr normalizes a gateway address for local connections.
@@ -85,7 +87,7 @@ func registerProviders(registry *providers.Registry, cfg *config.Config) {
 	}
 
 	if cfg.Providers.DashScope.APIKey != "" {
-		registry.Register(providers.NewDashScopeProvider(cfg.Providers.DashScope.APIKey, cfg.Providers.DashScope.APIBase, "qwen3-max"))
+		registry.Register(providers.NewDashScopeProvider("dashscope", cfg.Providers.DashScope.APIKey, cfg.Providers.DashScope.APIBase, "qwen3-max"))
 		slog.Info("registered provider", "name", "dashscope")
 	}
 
@@ -157,6 +159,11 @@ func registerProviders(registry *providers.Registry, cfg *config.Config) {
 		registry.Register(providers.NewClaudeCLIProvider(cliPath, opts...))
 		slog.Info("registered provider", "name", "claude-cli")
 	}
+
+	// ACP provider (config-based) — orchestrates any ACP-compatible agent binary
+	if cfg.Providers.ACP.Binary != "" {
+		registerACPFromConfig(registry, cfg.Providers.ACP)
+	}
 }
 
 // buildMCPServerLookup creates an MCPServerLookup from an MCPServerStore.
@@ -224,7 +231,8 @@ func jsonToStringMap(data json.RawMessage) map[string]string {
 // DB providers are registered after config providers, so they take precedence (overwrite).
 // gatewayAddr is used to inject GoClaw MCP bridge for Claude CLI providers.
 // mcpStore is optional; when provided, per-agent MCP servers are injected into CLI config.
-func registerProvidersFromDB(registry *providers.Registry, provStore store.ProviderStore, secretStore store.ConfigSecretsStore, gatewayAddr, gatewayToken string, mcpStore store.MCPServerStore) {
+// cfg provides fallback api_base values from config/env when DB providers have none set.
+func registerProvidersFromDB(registry *providers.Registry, provStore store.ProviderStore, secretStore store.ConfigSecretsStore, gatewayAddr, gatewayToken string, mcpStore store.MCPServerStore, cfg *config.Config) {
 	ctx := context.Background()
 	dbProviders, err := provStore.ListProviders(ctx)
 	if err != nil {
@@ -261,6 +269,11 @@ func registerProvidersFromDB(registry *providers.Registry, provStore store.Provi
 			slog.Info("registered provider from DB", "name", p.Name)
 			continue
 		}
+		// ACP provider — no API key needed (agents manage their own auth).
+		if p.ProviderType == store.ProviderACP {
+			registerACPFromDB(registry, p)
+			continue
+		}
 		// Local Ollama requires no API key — handle before the key guard (same pattern as ClaudeCLI).
 		if p.ProviderType == store.ProviderOllama {
 			host := p.APIBase
@@ -275,6 +288,13 @@ func registerProvidersFromDB(registry *providers.Registry, provStore store.Provi
 		if p.APIKey == "" {
 			continue
 		}
+		// Fall back to config/env api_base when DB provider has none set.
+		if p.APIBase == "" && cfg != nil {
+			if base := cfg.Providers.APIBaseForType(p.ProviderType); base != "" {
+				p.APIBase = base
+				slog.Info("provider api_base inherited from config", "name", p.Name, "api_base", base)
+			}
+		}
 		switch p.ProviderType {
 		case store.ProviderChatGPTOAuth:
 			ts := oauth.NewDBTokenSource(provStore, secretStore, p.Name)
@@ -283,7 +303,7 @@ func registerProvidersFromDB(registry *providers.Registry, provStore store.Provi
 			registry.Register(providers.NewAnthropicProvider(p.APIKey,
 				providers.WithAnthropicBaseURL(p.APIBase)))
 		case store.ProviderDashScope:
-			registry.Register(providers.NewDashScopeProvider(p.APIKey, p.APIBase, ""))
+			registry.Register(providers.NewDashScopeProvider(p.Name, p.APIKey, p.APIBase, ""))
 		case store.ProviderBailian:
 			base := p.APIBase
 			if base == "" {
@@ -328,4 +348,82 @@ func registerProvidersFromDB(registry *providers.Registry, provStore store.Provi
 		}
 		slog.Info("registered provider from DB", "name", p.Name)
 	}
+}
+
+// registerACPFromConfig registers an ACP provider from config file settings.
+func registerACPFromConfig(registry *providers.Registry, cfg config.ACPConfig) {
+	if _, err := exec.LookPath(cfg.Binary); err != nil {
+		slog.Warn("acp: binary not found, skipping", "binary", cfg.Binary, "error", err)
+		return
+	}
+	idleTTL := 5 * time.Minute
+	if cfg.IdleTTL != "" {
+		if d, err := time.ParseDuration(cfg.IdleTTL); err == nil {
+			idleTTL = d
+		}
+	}
+	workDir := cfg.WorkDir
+	if workDir == "" {
+		workDir = defaultACPWorkDir()
+	}
+	var opts []providers.ACPOption
+	if cfg.Model != "" {
+		opts = append(opts, providers.WithACPModel(cfg.Model))
+	}
+	if cfg.PermMode != "" {
+		opts = append(opts, providers.WithACPPermMode(cfg.PermMode))
+	}
+	registry.Register(providers.NewACPProvider(
+		cfg.Binary, cfg.Args, workDir, idleTTL, tools.DefaultDenyPatterns(), opts...,
+	))
+	slog.Info("registered provider", "name", "acp", "binary", cfg.Binary)
+}
+
+// registerACPFromDB registers an ACP provider from a DB provider row.
+func registerACPFromDB(registry *providers.Registry, p store.LLMProviderData) {
+	binary := p.APIBase // repurpose api_base as binary path
+	if binary == "" {
+		slog.Warn("acp: no binary specified in DB provider", "name", p.Name)
+		return
+	}
+	if binary != "claude" && binary != "codex" && binary != "gemini" && !filepath.IsAbs(binary) {
+		slog.Warn("security.acp: invalid binary path from DB", "path", binary)
+		return
+	}
+	if _, err := exec.LookPath(binary); err != nil {
+		slog.Warn("acp: binary not found, skipping", "binary", binary, "error", err)
+		return
+	}
+	// Parse settings JSONB for extra config
+	var settings struct {
+		Args     []string `json:"args"`
+		IdleTTL  string   `json:"idle_ttl"`
+		PermMode string   `json:"perm_mode"`
+		WorkDir  string   `json:"work_dir"`
+	}
+	if p.Settings != nil {
+		if err := json.Unmarshal(p.Settings, &settings); err != nil {
+			slog.Warn("acp: invalid settings JSON, using defaults", "name", p.Name, "error", err)
+		}
+	}
+	idleTTL := 5 * time.Minute
+	if settings.IdleTTL != "" {
+		if d, err := time.ParseDuration(settings.IdleTTL); err == nil {
+			idleTTL = d
+		}
+	}
+	workDir := settings.WorkDir
+	if workDir == "" {
+		workDir = defaultACPWorkDir()
+	}
+	registry.Register(providers.NewACPProvider(
+		binary, settings.Args, workDir, idleTTL, tools.DefaultDenyPatterns(),
+		providers.WithACPModel(p.Name),
+	))
+	slog.Info("registered provider from DB", "name", p.Name, "type", "acp")
+}
+
+// defaultACPWorkDir returns the default workspace directory for ACP agents.
+func defaultACPWorkDir() string {
+	return filepath.Join(config.ResolvedDataDirFromEnv(), "acp-workspaces")
 }

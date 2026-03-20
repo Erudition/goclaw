@@ -17,16 +17,17 @@ import (
 
 // ChannelInstancesHandler handles channel instance CRUD endpoints.
 type ChannelInstancesHandler struct {
-	store        store.ChannelInstanceStore
-	agentStore   store.AgentStore
-	contactStore store.ContactStore
-	token        string
-	msgBus       *bus.MessageBus
+	store           store.ChannelInstanceStore
+	agentStore      store.AgentStore
+	configPermStore store.ConfigPermissionStore
+	contactStore    store.ContactStore
+	token           string
+	msgBus          *bus.MessageBus
 }
 
 // NewChannelInstancesHandler creates a handler for channel instance management endpoints.
-func NewChannelInstancesHandler(s store.ChannelInstanceStore, agentStore store.AgentStore, contactStore store.ContactStore, token string, msgBus *bus.MessageBus) *ChannelInstancesHandler {
-	return &ChannelInstancesHandler{store: s, agentStore: agentStore, contactStore: contactStore, token: token, msgBus: msgBus}
+func NewChannelInstancesHandler(s store.ChannelInstanceStore, agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, contactStore store.ContactStore, token string, msgBus *bus.MessageBus) *ChannelInstancesHandler {
+	return &ChannelInstancesHandler{store: s, agentStore: agentStore, configPermStore: configPermStore, contactStore: contactStore, token: token, msgBus: msgBus}
 }
 
 // RegisterRoutes registers all channel instance routes on the given mux.
@@ -44,7 +45,7 @@ func (h *ChannelInstancesHandler) RegisterRoutes(mux *http.ServeMux) {
 	}
 
 	// Group file writers (nested under channel instances)
-	if h.agentStore != nil {
+	if h.configPermStore != nil {
 		mux.HandleFunc("GET /v1/channels/instances/{id}/writers/groups", h.auth(h.handleWriterGroups))
 		mux.HandleFunc("GET /v1/channels/instances/{id}/writers", h.auth(h.handleListWriters))
 		mux.HandleFunc("POST /v1/channels/instances/{id}/writers", h.auth(h.handleAddWriter))
@@ -53,22 +54,7 @@ func (h *ChannelInstancesHandler) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (h *ChannelInstancesHandler) auth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if h.token != "" {
-			if extractBearerToken(r) != h.token {
-				locale := extractLocale(r)
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": i18n.T(locale, i18n.MsgUnauthorized)})
-				return
-			}
-		}
-		userID := extractUserID(r)
-		ctx := store.WithLocale(r.Context(), extractLocale(r))
-		if userID != "" {
-			ctx = store.WithUserID(ctx, userID)
-		}
-		r = r.WithContext(ctx)
-		next(w, r)
-	}
+	return requireAuth(h.token, "", next)
 }
 
 func (h *ChannelInstancesHandler) emitCacheInvalidate() {
@@ -111,12 +97,12 @@ func (h *ChannelInstancesHandler) handleList(w http.ResponseWriter, r *http.Requ
 
 	total, _ := h.store.CountInstances(r.Context(), opts)
 
-	result := make([]map[string]interface{}, 0, len(instances))
+	result := make([]map[string]any, 0, len(instances))
 	for _, inst := range instances {
 		result = append(result, maskInstanceHTTP(inst))
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"instances": result,
 		"total":     total,
 		"limit":     opts.Limit,
@@ -181,6 +167,7 @@ func (h *ChannelInstancesHandler) handleCreate(w http.ResponseWriter, r *http.Re
 	}
 
 	h.emitCacheInvalidate()
+	emitAudit(h.msgBus, r, "channel_instance.created", "channel_instance", inst.ID.String())
 	writeJSON(w, http.StatusCreated, maskInstanceHTTP(*inst))
 }
 
@@ -209,11 +196,14 @@ func (h *ChannelInstancesHandler) handleUpdate(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	var updates map[string]interface{}
+	var updates map[string]any
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&updates); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidJSON)})
 		return
 	}
+
+	// Allowlist: only permit known channel instance columns.
+	updates = filterAllowedKeys(updates, channelInstanceAllowedFields)
 
 	if err := h.store.Update(r.Context(), id, updates); err != nil {
 		slog.Error("channel_instances.update", "error", err)
@@ -222,6 +212,7 @@ func (h *ChannelInstancesHandler) handleUpdate(w http.ResponseWriter, r *http.Re
 	}
 
 	h.emitCacheInvalidate()
+	emitAudit(h.msgBus, r, "channel_instance.updated", "channel_instance", id.String())
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -251,12 +242,13 @@ func (h *ChannelInstancesHandler) handleDelete(w http.ResponseWriter, r *http.Re
 	}
 
 	h.emitCacheInvalidate()
+	emitAudit(h.msgBus, r, "channel_instance.deleted", "channel_instance", id.String())
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // maskInstanceHTTP returns a map with credentials masked for HTTP responses.
-func maskInstanceHTTP(inst store.ChannelInstanceData) map[string]interface{} {
-	result := map[string]interface{}{
+func maskInstanceHTTP(inst store.ChannelInstanceData) map[string]any {
+	result := map[string]any{
 		"id":              inst.ID,
 		"name":            inst.Name,
 		"display_name":    inst.DisplayName,
@@ -272,9 +264,9 @@ func maskInstanceHTTP(inst store.ChannelInstanceData) map[string]interface{} {
 	}
 
 	if len(inst.Credentials) > 0 {
-		var raw map[string]interface{}
+		var raw map[string]any
 		if json.Unmarshal(inst.Credentials, &raw) == nil {
-			masked := make(map[string]interface{}, len(raw))
+			masked := make(map[string]any, len(raw))
 			for k := range raw {
 				masked[k] = "***"
 			}
@@ -312,17 +304,29 @@ func (h *ChannelInstancesHandler) handleWriterGroups(w http.ResponseWriter, r *h
 	if !ok {
 		return
 	}
-	groups, err := h.agentStore.ListGroupFileWriterGroups(r.Context(), agentID)
+	perms, err := h.configPermStore.List(r.Context(), agentID, "file_writer", "")
 	if err != nil {
 		slog.Error("channel_instances.writer_groups", "error", err)
 		locale := store.LocaleFromContext(r.Context())
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgFailedToList, "writer groups")})
 		return
 	}
-	if groups == nil {
-		groups = []store.GroupWriterGroupInfo{}
+	// Group by scope
+	counts := make(map[string]int)
+	for _, p := range perms {
+		if p.Permission == "allow" {
+			counts[p.Scope]++
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"groups": groups})
+	type groupInfo struct {
+		GroupID     string `json:"group_id"`
+		WriterCount int    `json:"writer_count"`
+	}
+	groups := make([]groupInfo, 0, len(counts))
+	for scope, count := range counts {
+		groups = append(groups, groupInfo{GroupID: scope, WriterCount: count})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"groups": groups})
 }
 
 func (h *ChannelInstancesHandler) handleListWriters(w http.ResponseWriter, r *http.Request) {
@@ -336,16 +340,38 @@ func (h *ChannelInstancesHandler) handleListWriters(w http.ResponseWriter, r *ht
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgRequired, "group_id")})
 		return
 	}
-	writers, err := h.agentStore.ListGroupFileWriters(r.Context(), agentID, groupID)
+	perms, err := h.configPermStore.List(r.Context(), agentID, "file_writer", groupID)
 	if err != nil {
 		slog.Error("channel_instances.list_writers", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgFailedToList, "writers")})
 		return
 	}
-	if writers == nil {
-		writers = []store.GroupFileWriterData{}
+	type writerData struct {
+		UserID      string  `json:"user_id"`
+		DisplayName *string `json:"display_name,omitempty"`
+		Username    *string `json:"username,omitempty"`
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"writers": writers})
+	writers := make([]writerData, 0, len(perms))
+	for _, p := range perms {
+		if p.Permission != "allow" {
+			continue
+		}
+		wd := writerData{UserID: p.UserID}
+		var meta struct {
+			DisplayName string `json:"displayName"`
+			Username    string `json:"username"`
+		}
+		if json.Unmarshal(p.Metadata, &meta) == nil {
+			if meta.DisplayName != "" {
+				wd.DisplayName = &meta.DisplayName
+			}
+			if meta.Username != "" {
+				wd.Username = &meta.Username
+			}
+		}
+		writers = append(writers, wd)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"writers": writers})
 }
 
 func (h *ChannelInstancesHandler) handleAddWriter(w http.ResponseWriter, r *http.Request) {
@@ -368,7 +394,15 @@ func (h *ChannelInstancesHandler) handleAddWriter(w http.ResponseWriter, r *http
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgRequired, "group_id and user_id")})
 		return
 	}
-	if err := h.agentStore.AddGroupFileWriter(r.Context(), agentID, body.GroupID, body.UserID, body.DisplayName, body.Username); err != nil {
+	meta, _ := json.Marshal(map[string]string{"displayName": body.DisplayName, "username": body.Username})
+	if err := h.configPermStore.Grant(r.Context(), &store.ConfigPermission{
+		AgentID:    agentID,
+		Scope:      body.GroupID,
+		ConfigType: "file_writer",
+		UserID:     body.UserID,
+		Permission: "allow",
+		Metadata:   meta,
+	}); err != nil {
 		slog.Error("channel_instances.add_writer", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgFailedToCreate, "writer", err.Error())})
 		return
@@ -388,7 +422,19 @@ func (h *ChannelInstancesHandler) handleRemoveWriter(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgRequired, "group_id and userId")})
 		return
 	}
-	if err := h.agentStore.RemoveGroupFileWriter(r.Context(), agentID, groupID, userID); err != nil {
+	// Prevent removing the last writer (same guard as Telegram /removewriter)
+	writers, _ := h.configPermStore.List(r.Context(), agentID, "file_writer", groupID)
+	allowCount := 0
+	for _, p := range writers {
+		if p.Permission == "allow" {
+			allowCount++
+		}
+	}
+	if allowCount <= 1 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "cannot remove the last file writer"})
+		return
+	}
+	if err := h.configPermStore.Revoke(r.Context(), agentID, groupID, "file_writer", userID); err != nil {
 		slog.Error("channel_instances.remove_writer", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgFailedToDelete, "writer", err.Error())})
 		return
@@ -440,7 +486,7 @@ func (h *ChannelInstancesHandler) handleListContacts(w http.ResponseWriter, r *h
 		slog.Warn("contacts.count", "error", countErr)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"contacts": contacts,
 		"total":    total,
 		"limit":    opts.Limit,
@@ -451,7 +497,7 @@ func (h *ChannelInstancesHandler) handleListContacts(w http.ResponseWriter, r *h
 func (h *ChannelInstancesHandler) handleResolveContacts(w http.ResponseWriter, r *http.Request) {
 	idsParam := r.URL.Query().Get("ids")
 	if idsParam == "" {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"contacts": map[string]any{}})
+		writeJSON(w, http.StatusOK, map[string]any{"contacts": map[string]any{}})
 		return
 	}
 
@@ -468,7 +514,7 @@ func (h *ChannelInstancesHandler) handleResolveContacts(w http.ResponseWriter, r
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"contacts": result})
+	writeJSON(w, http.StatusOK, map[string]any{"contacts": result})
 }
 
 // isValidChannelType checks if the channel type is supported.

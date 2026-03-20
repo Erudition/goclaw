@@ -41,7 +41,13 @@ func (h *ProvidersHandler) handleListProviderModels(w http.ResponseWriter, r *ht
 
 	// Claude CLI doesn't need an API key — return hardcoded models
 	if p.ProviderType == store.ProviderClaudeCLI {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"models": claudeCLIModels()})
+		writeJSON(w, http.StatusOK, map[string]any{"models": claudeCLIModels()})
+		return
+	}
+
+	// ACP agents don't need an API key — return hardcoded models
+	if p.ProviderType == store.ProviderACP {
+		writeJSON(w, http.StatusOK, map[string]any{"models": acpModels()})
 		return
 	}
 
@@ -57,7 +63,7 @@ func (h *ProvidersHandler) handleListProviderModels(w http.ResponseWriter, r *ht
 
 	switch p.ProviderType {
 	case "anthropic_native":
-		models, err = fetchAnthropicModels(ctx, p.APIKey, p.APIBase)
+		models, err = fetchAnthropicModels(ctx, p.APIKey, h.resolveAPIBase(p))
 	case "gemini_native":
 		models, err = fetchGeminiModels(ctx, p.APIKey)
 	case "bailian":
@@ -70,7 +76,7 @@ func (h *ProvidersHandler) handleListProviderModels(w http.ResponseWriter, r *ht
 		models = sunoModels()
 	default:
 		// All other types use OpenAI-compatible /models endpoint
-		apiBase := strings.TrimRight(p.APIBase, "/")
+		apiBase := strings.TrimRight(h.resolveAPIBase(p), "/")
 		if apiBase == "" {
 			apiBase = "https://api.openai.com/v1"
 		}
@@ -80,11 +86,11 @@ func (h *ProvidersHandler) handleListProviderModels(w http.ResponseWriter, r *ht
 	if err != nil {
 		slog.Warn("providers.models", "provider", p.Name, "error", err)
 		// Return empty list instead of error — provider may not support /models
-		writeJSON(w, http.StatusOK, map[string]interface{}{"models": []ModelInfo{}})
+		writeJSON(w, http.StatusOK, map[string]any{"models": []ModelInfo{}})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"models": models})
+	writeJSON(w, http.StatusOK, map[string]any{"models": models})
 }
 
 // fetchAnthropicModels calls the Anthropic models API.
@@ -189,6 +195,7 @@ func minimaxModels() []ModelInfo {
 		// Chat / text
 		{ID: "MiniMax-Text-01", Name: "MiniMax Text 01"},
 		{ID: "MiniMax-M1", Name: "MiniMax M1"},
+		{ID: "MiniMax-M2.7", Name: "MiniMax M2.7"},
 		{ID: "MiniMax-M2.5", Name: "MiniMax M2.5"},
 		// Image generation
 		{ID: "image-01", Name: "Image 01"},
@@ -209,7 +216,10 @@ func minimaxModels() []ModelInfo {
 // DashScope does not expose a standard /v1/models endpoint.
 func dashScopeModels() []ModelInfo {
 	return []ModelInfo{
-		// Chat / text
+		// Qwen3.5 series — Text Generation + Deep Thinking + Visual Understanding
+		{ID: "qwen3.5-plus", Name: "Qwen 3.5 Plus"},
+		{ID: "qwen3.5-turbo", Name: "Qwen 3.5 Turbo"},
+		// Qwen3 hosted series — Text + Thinking
 		{ID: "qwen3-max", Name: "Qwen 3 Max"},
 		{ID: "qwen3-plus", Name: "Qwen 3 Plus"},
 		{ID: "qwen3-turbo", Name: "Qwen 3 Turbo"},
@@ -236,6 +246,15 @@ func claudeCLIModels() []ModelInfo {
 		{ID: "sonnet", Name: "Sonnet"},
 		{ID: "opus", Name: "Opus"},
 		{ID: "haiku", Name: "Haiku"},
+	}
+}
+
+// acpModels returns the model aliases for ACP-compatible coding agents.
+func acpModels() []ModelInfo {
+	return []ModelInfo{
+		{ID: "claude", Name: "Claude"},
+		{ID: "codex", Name: "Codex"},
+		{ID: "gemini", Name: "Gemini"},
 	}
 }
 
@@ -274,4 +293,3 @@ func fetchOpenAIModels(ctx context.Context, apiBase, apiKey string) ([]ModelInfo
 	}
 	return models, nil
 }
-

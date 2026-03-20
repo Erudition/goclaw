@@ -11,6 +11,7 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
+	"github.com/nextlevelbuilder/goclaw/internal/permissions"
 	"github.com/nextlevelbuilder/goclaw/internal/sessions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -19,9 +20,9 @@ import (
 type ChatCompletionsHandler struct {
 	agents      *agent.Router
 	sessions    store.SessionStore
-	token       string              // expected bearer token (empty = no auth)
+	token       string // expected bearer token (empty = no auth)
 	isManaged   bool
-	rateLimiter func(string) bool   // rate limit check: key → allowed (nil = no limit)
+	rateLimiter func(string) bool // rate limit check: key → allowed (nil = no limit)
 }
 
 // NewChatCompletionsHandler creates a handler for the chat completions endpoint.
@@ -40,10 +41,10 @@ func (h *ChatCompletionsHandler) SetRateLimiter(fn func(string) bool) {
 }
 
 type chatCompletionsRequest struct {
-	Model    string           `json:"model"`
-	Messages []chatMessage    `json:"messages"`
-	Stream   bool             `json:"stream"`
-	User     string           `json:"user,omitempty"`
+	Model    string        `json:"model"`
+	Messages []chatMessage `json:"messages"`
+	Stream   bool          `json:"stream"`
+	User     string        `json:"user,omitempty"`
 }
 
 type chatMessage struct {
@@ -53,12 +54,12 @@ type chatMessage struct {
 }
 
 type chatCompletionsResponse struct {
-	ID      string            `json:"id"`
-	Object  string            `json:"object"`
-	Created int64             `json:"created"`
-	Model   string            `json:"model"`
-	Choices []chatChoice      `json:"choices"`
-	Usage   *chatUsage        `json:"usage,omitempty"`
+	ID      string       `json:"id"`
+	Object  string       `json:"object"`
+	Created int64        `json:"created"`
+	Model   string       `json:"model"`
+	Choices []chatChoice `json:"choices"`
+	Usage   *chatUsage   `json:"usage,omitempty"`
 }
 
 type chatChoice struct {
@@ -82,9 +83,14 @@ func (h *ChatCompletionsHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Auth check (timing-safe comparison)
-	if !tokenMatch(extractBearerToken(r), h.token) {
+	// Auth + RBAC check (gateway token or API key, operator required for POST)
+	auth := resolveAuth(r, h.token)
+	if !auth.Authenticated {
 		http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"invalid_request_error"}}`, i18n.T(locale, i18n.MsgInvalidAuth)), http.StatusUnauthorized)
+		return
+	}
+	if !permissions.HasMinRole(auth.Role, permissions.RoleOperator) {
+		http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"invalid_request_error"}}`, i18n.T(locale, i18n.MsgPermissionDenied, "/v1/chat/completions")), http.StatusForbidden)
 		return
 	}
 
@@ -247,12 +253,12 @@ func (h *ChatCompletionsHandler) handleStream(w http.ResponseWriter, r *http.Req
 }
 
 func writeSSEChunk(w http.ResponseWriter, flusher http.Flusher, id, model string, delta *chatMessage, finishReason string) {
-	chunk := map[string]interface{}{
+	chunk := map[string]any{
 		"id":      id,
 		"object":  "chat.completion.chunk",
 		"created": time.Now().Unix(),
 		"model":   model,
-		"choices": []map[string]interface{}{{
+		"choices": []map[string]any{{
 			"index":         0,
 			"delta":         delta,
 			"finish_reason": nilIfEmpty(finishReason),
@@ -264,7 +270,7 @@ func writeSSEChunk(w http.ResponseWriter, flusher http.Flusher, id, model string
 	flusher.Flush()
 }
 
-func nilIfEmpty(s string) interface{} {
+func nilIfEmpty(s string) any {
 	if s == "" {
 		return nil
 	}

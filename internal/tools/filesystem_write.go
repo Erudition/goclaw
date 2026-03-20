@@ -19,7 +19,8 @@ type WriteFileTool struct {
 	sandboxMgr       sandbox.Manager
 	contextFileIntc  *ContextFileInterceptor // nil = no virtual FS routing
 	memIntc          *MemoryInterceptor      // nil = no memory routing
-	groupWriterCache *store.GroupWriterCache // nil = no group write restriction
+	permStore     store.ConfigPermissionStore // nil = no group write restriction
+	workspaceIntc *WorkspaceInterceptor      // nil = no team workspace validation
 }
 
 // DenyPaths adds path prefixes that write_file must reject.
@@ -37,9 +38,14 @@ func (t *WriteFileTool) SetMemoryInterceptor(intc *MemoryInterceptor) {
 	t.memIntc = intc
 }
 
-// SetGroupWriterCache enables group write permission checks.
-func (t *WriteFileTool) SetGroupWriterCache(c *store.GroupWriterCache) {
-	t.groupWriterCache = c
+// SetConfigPermStore enables group write permission checks.
+func (t *WriteFileTool) SetConfigPermStore(s store.ConfigPermissionStore) {
+	t.permStore = s
+}
+
+// SetWorkspaceInterceptor enables team workspace validation and event broadcasting.
+func (t *WriteFileTool) SetWorkspaceInterceptor(intc *WorkspaceInterceptor) {
+	t.workspaceIntc = intc
 }
 
 func NewWriteFileTool(workspace string, restrict bool) *WriteFileTool {
@@ -55,7 +61,9 @@ func (t *WriteFileTool) SetSandboxKey(key string) {}
 
 func (t *WriteFileTool) Name() string { return "write_file" }
 func (t *WriteFileTool) Description() string {
-	return "Write content to a file, creating directories as needed"
+	return "Write content to a file, creating directories as needed. " +
+		"IMPORTANT: content longer than ~12000 characters may be truncated by the API. " +
+		"For large files, use the edit tool to build the file in sections, or split into multiple write_file calls with append=true."
 }
 func (t *WriteFileTool) Parameters() map[string]any {
 	return map[string]any{
@@ -63,15 +71,19 @@ func (t *WriteFileTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"path": map[string]any{
 				"type":        "string",
-				"description": "Path to the file to write",
+				"description": "File path (relative to workspace, or absolute)",
 			},
 			"content": map[string]any{
 				"type":        "string",
 				"description": "Content to write",
 			},
+			"append": map[string]any{
+				"type":        "boolean",
+				"description": "Append content to the file instead of overwriting. Use this to build large files in chunks.",
+			},
 			"deliver": map[string]any{
 				"type":        "boolean",
-				"description": "If true, deliver this file to the user as an attachment (image, document, etc.)",
+				"description": "Deliver this file to the user as an attachment. Defaults to true. Set to false for intermediate/temporary files (e.g. config, cache, temp scripts).",
 			},
 		},
 		"required": []string{"path", "content"},
@@ -81,14 +93,18 @@ func (t *WriteFileTool) Parameters() map[string]any {
 func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *Result {
 	path, _ := args["path"].(string)
 	content, _ := args["content"].(string)
-	deliver, _ := args["deliver"].(bool)
+	appendMode, _ := args["append"].(bool)
+	deliver := true
+	if v, ok := args["deliver"].(bool); ok {
+		deliver = v
+	}
 	if path == "" {
 		return ErrorResult("path is required")
 	}
 
 	// Group write permission check
-	if t.groupWriterCache != nil {
-		if err := store.CheckGroupWritePermission(ctx, t.groupWriterCache); err != nil {
+	if t.permStore != nil {
+		if err := store.CheckFileWriterPermission(ctx, t.permStore); err != nil {
 			return ErrorResult(err.Error())
 		}
 	}
@@ -105,13 +121,25 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *Resul
 
 	// Virtual FS: route memory files to DB
 	if t.memIntc != nil {
-		if mwr, err := t.memIntc.WriteFile(ctx, path, content); mwr.Handled {
+		if mwr, err := t.memIntc.WriteFile(ctx, path, content, appendMode); mwr.Handled {
 			if err != nil {
 				return ErrorResult(fmt.Sprintf("failed to write memory file: %v", err))
 			}
 			msg := fmt.Sprintf("Memory file written: %s (%d bytes)", path, len(content))
 			if mwr.KGTriggered {
 				msg += "\n\n[Knowledge graph extraction triggered in background. The knowledge system may take a moment to fully update with new entities and relationships.]"
+			}
+			if mwr.PreviousContent != "" {
+				prev := mwr.PreviousContent
+				prevRunes := []rune(prev)
+				if len(prevRunes) > 4000 {
+					prev = string(prevRunes[:4000]) + "\n... (truncated)"
+				}
+				msg += fmt.Sprintf("\n\n⚠️ WARNING: This file had existing content (%d chars) that was replaced. "+
+					"If the old content below contains information not present in your new version, "+
+					"please re-write the file to merge both.\n\n"+
+					"--- PREVIOUS CONTENT ---\n%s\n--- END PREVIOUS CONTENT ---",
+					len([]rune(mwr.PreviousContent)), prev)
 			}
 			return SilentResult(msg)
 		}
@@ -128,7 +156,8 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *Resul
 	if workspace == "" {
 		workspace = t.workspace
 	}
-	resolved, err := resolvePath(path, workspace, effectiveRestrict(ctx, t.restrict))
+	allowed := allowedWithTeamWorkspace(ctx, nil)
+	resolved, err := resolvePathWithAllowed(path, workspace, effectiveRestrict(ctx, t.restrict), allowed)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
@@ -136,15 +165,52 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *Resul
 		return ErrorResult(err.Error())
 	}
 
+	// Team workspace validation + delete-on-empty.
+	if t.workspaceIntc != nil {
+		isDelete, intcErr := t.workspaceIntc.HandleWrite(ctx, resolved, content)
+		if intcErr != nil {
+			return ErrorResult(intcErr.Error())
+		}
+		if isDelete {
+			if err := os.Remove(resolved); err != nil && !os.IsNotExist(err) {
+				return ErrorResult(fmt.Sprintf("failed to delete file: %v", err))
+			}
+			t.workspaceIntc.AfterWrite(ctx, resolved, "delete")
+			return SilentResult(fmt.Sprintf("File deleted: %s", path))
+		}
+	}
+
 	if err := os.MkdirAll(filepath.Dir(resolved), 0755); err != nil {
 		return ErrorResult(fmt.Sprintf("failed to create directory: %v", err))
 	}
 
-	if err := os.WriteFile(resolved, []byte(content), 0644); err != nil {
+	if appendMode {
+		f, err := os.OpenFile(resolved, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("failed to open file for append: %v", err))
+		}
+		_, err = f.WriteString(content)
+		f.Close()
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("failed to append to file: %v", err))
+		}
+	} else if err := os.WriteFile(resolved, []byte(content), 0644); err != nil {
 		return ErrorResult(fmt.Sprintf("failed to write file: %v", err))
 	}
 
-	result := SilentResult(fmt.Sprintf("File written: %s (%d bytes)", path, len(content)))
+	if t.workspaceIntc != nil {
+		t.workspaceIntc.AfterWrite(ctx, resolved, "write")
+	}
+
+	verb := "written"
+	if appendMode {
+		verb = "appended"
+	}
+	msg := fmt.Sprintf("File %s: %s (%d bytes)", verb, path, len(content))
+	if deliver {
+		msg += ". File will be automatically delivered to the user — do NOT send it again via message tool."
+	}
+	result := SilentResult(msg)
 	result.Deliverable = content
 	if deliver {
 		result.Media = []bus.MediaFile{{Path: resolved}}
@@ -153,36 +219,33 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *Resul
 }
 
 func (t *WriteFileTool) executeInSandbox(ctx context.Context, path, content, sandboxKey string, deliver bool) *Result {
-	// Map effective workspace to container path
-	workspace := ToolWorkspaceFromCtx(ctx)
-	if workspace == "" {
-		workspace = t.workspace
-	}
-
-	containerCwd, err := MapHostPathToSandbox(ctx, workspace, t.workspace)
-	if err != nil {
-		return ErrorResult(fmt.Sprintf("sandbox write: %v", err))
-	}
-
-	// Resolve the requested 'path' relative to the agent's container workdir.
-	containerPath := path
-	if !filepath.IsAbs(path) {
-		containerPath = filepath.Join(containerCwd, path)
-	}
-
 	bridge, err := t.getFsBridge(ctx, sandboxKey)
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("sandbox error: %v", err))
 	}
 
+	containerCwd, cwdErr := SandboxCwd(ctx, t.workspace, sandbox.DefaultContainerWorkdir)
+	if cwdErr != nil {
+		return ErrorResult(fmt.Sprintf("sandbox path mapping: %v", cwdErr))
+	}
+	containerPath := ResolveSandboxPath(path, containerCwd)
+
 	if err := bridge.WriteFile(ctx, containerPath, content); err != nil {
-		return ErrorResult(fmt.Sprintf("failed to write file: %v", err))
+		return ErrorResult(fmt.Sprintf("failed to write file: %v", err) + MaybeFsBridgeHint(err))
 	}
 
-	result := SilentResult(fmt.Sprintf("File written: %s (%d bytes)", path, len(content)))
+	msg := fmt.Sprintf("File written: %s (%d bytes)", path, len(content))
+	if deliver {
+		msg += ". File will be automatically delivered to the user — do NOT send it again via message tool."
+	}
+	result := SilentResult(msg)
 	result.Deliverable = content
 	if deliver {
-		// hostPath is already correctly absolute (workspace is calculated above)
+		// Sandbox workspace is bind-mounted — resolve to host path for delivery
+		workspace := ToolWorkspaceFromCtx(ctx)
+		if workspace == "" {
+			workspace = t.workspace
+		}
 		hostPath := filepath.Join(workspace, path)
 		result.Media = []bus.MediaFile{{Path: hostPath}}
 	}
@@ -190,16 +253,9 @@ func (t *WriteFileTool) executeInSandbox(ctx context.Context, path, content, san
 }
 
 func (t *WriteFileTool) getFsBridge(ctx context.Context, sandboxKey string) (*sandbox.FsBridge, error) {
-	if netEnabled := ToolSandboxNetworkFromCtx(ctx); netEnabled {
-		ctx = sandbox.WithNetworkOverride(ctx, true)
-	}
 	sb, err := t.sandboxMgr.Get(ctx, sandboxKey, t.workspace, SandboxConfigFromCtx(ctx))
 	if err != nil {
 		return nil, err
 	}
-	containerDir := ToolSandboxDirFromCtx(ctx)
-	if containerDir == "" {
-		containerDir = "/workspace" // fallback
-	}
-	return sandbox.NewFsBridge(sb.ID(), containerDir), nil
+	return sandbox.NewFsBridge(sb.ID(), sandbox.DefaultContainerWorkdir), nil
 }

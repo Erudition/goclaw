@@ -12,31 +12,38 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
-func registerAllMethods(server *gateway.Server, agents *agent.Router, sessStore store.SessionStore, cronStore store.CronStore, pairingStore store.PairingStore, cfg *config.Config, cfgPath, workspace, dataDir string, msgBus *bus.MessageBus, execApprovalMgr *tools.ExecApprovalManager, agentStore store.AgentStore, skillStore store.SkillStore, configSecretsStore store.ConfigSecretsStore, teamStore store.TeamStore, contextFileInterceptor *tools.ContextFileInterceptor, logTee *gateway.LogTee) *methods.PairingMethods {
+func registerAllMethods(server *gateway.Server, agents *agent.Router, sessStore store.SessionStore, cronStore store.CronStore, pairingStore store.PairingStore, cfg *config.Config, cfgPath, workspace, dataDir string, msgBus *bus.MessageBus, execApprovalMgr *tools.ExecApprovalManager, agentStore store.AgentStore, skillStore store.SkillStore, configSecretsStore store.ConfigSecretsStore, teamStore store.TeamStore, contextFileInterceptor *tools.ContextFileInterceptor, logTee *gateway.LogTee, heartbeatStore store.HeartbeatStore, configPermStore store.ConfigPermissionStore) (*methods.PairingMethods, *methods.HeartbeatMethods) {
 	router := server.Router()
 
 	// Phase 1: Core methods
-	methods.NewChatMethods(agents, sessStore, server.RateLimiter()).Register(router)
-	methods.NewAgentsMethods(agents, cfg, cfgPath, workspace, agentStore, contextFileInterceptor).Register(router)
-	methods.NewSessionsMethods(sessStore).Register(router)
+	methods.NewChatMethods(agents, sessStore, server.RateLimiter(), msgBus).Register(router)
+	methods.NewAgentsMethods(agents, cfg, cfgPath, workspace, agentStore, contextFileInterceptor, msgBus).Register(router)
+	methods.NewSessionsMethods(sessStore, msgBus).Register(router)
 	methods.NewConfigMethods(cfg, cfgPath, configSecretsStore, msgBus).Register(router)
 
 	// Phase 2: Skills (uses SkillStore interface — PG or File)
 	methods.NewSkillsMethods(skillStore).Register(router)
 
 	// Phase 2: Cron (store created externally, shared with gateway)
-	methods.NewCronMethods(cronStore).Register(router)
+	methods.NewCronMethods(cronStore, msgBus).Register(router)
+
+	// Phase 2: Heartbeat
+	heartbeatMethods := methods.NewHeartbeatMethods(heartbeatStore, msgBus)
+	heartbeatMethods.Register(router)
+
+	// Phase 2: Config permissions
+	methods.NewConfigPermissionsMethods(configPermStore, agentStore).Register(router)
 
 	// Phase 2: Pairing (store created externally, shared with channel manager).
 	// OnApprove callback is set later by the caller after channel manager is created.
-	pairingMethods := methods.NewPairingMethods(pairingStore, msgBus)
+	pairingMethods := methods.NewPairingMethods(pairingStore, msgBus, server.RateLimiter())
 	pairingMethods.Register(router)
 
 	// Phase 2: Usage (queries SessionStore for real token data)
 	methods.NewUsageMethods(sessStore).Register(router)
 
 	// Phase 2: Exec approval (always registered — returns empty when manager is nil)
-	methods.NewExecApprovalMethods(execApprovalMgr).Register(router)
+	methods.NewExecApprovalMethods(execApprovalMgr, msgBus).Register(router)
 
 	// Phase 2: Send (outbound message routing)
 	methods.NewSendMethods(msgBus).Register(router)
@@ -51,8 +58,8 @@ func registerAllMethods(server *gateway.Server, agents *agent.Router, sessStore 
 
 	slog.Info("registered all RPC methods",
 		"phase1", []string{"chat", "agents", "sessions", "config"},
-		"phase2", []string{"skills", "cron", "pairing", "usage", "exec_approval", "send"},
+		"phase2", []string{"skills", "cron", "heartbeat", "pairing", "usage", "exec_approval", "send"},
 	)
 
-	return pairingMethods
+	return pairingMethods, heartbeatMethods
 }

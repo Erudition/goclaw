@@ -18,7 +18,6 @@ import (
 // They don't exist on disk — if the model tries to read them, return a hint.
 var virtualSystemFiles = map[string]string{
 	bootstrap.TeamFile:         "TEAM.md is already loaded in your system prompt. Refer to the TEAM.md section in your context above for team member information.",
-	bootstrap.DelegationFile:   "DELEGATION.md is already loaded in your system prompt. Refer to the DELEGATION.md section in your context above for delegation instructions and available agents.",
 	bootstrap.AvailabilityFile: "AVAILABILITY.md is already loaded in your system prompt. Refer to the AVAILABILITY.md section in your context above for agent availability information.",
 }
 
@@ -31,7 +30,7 @@ type ReadFileTool struct {
 	sandboxMgr       sandbox.Manager         // nil = direct host access
 	contextFileIntc  *ContextFileInterceptor // nil = no virtual FS routing
 	memIntc          *MemoryInterceptor      // nil = no memory routing
-	groupWriterCache *store.GroupWriterCache // nil = no group read restriction
+	permStore store.ConfigPermissionStore // nil = no group read restriction
 }
 
 // SetContextFileInterceptor enables virtual FS routing for context files.
@@ -44,9 +43,9 @@ func (t *ReadFileTool) SetMemoryInterceptor(intc *MemoryInterceptor) {
 	t.memIntc = intc
 }
 
-// SetGroupWriterCache enables group read restriction for SOUL.md/AGENTS.md.
-func (t *ReadFileTool) SetGroupWriterCache(c *store.GroupWriterCache) {
-	t.groupWriterCache = c
+// SetConfigPermStore enables group read restriction for SOUL.md/AGENTS.md.
+func (t *ReadFileTool) SetConfigPermStore(s store.ConfigPermissionStore) {
+	t.permStore = s
 }
 
 func NewReadFileTool(workspace string, restrict bool) *ReadFileTool {
@@ -79,7 +78,7 @@ func (t *ReadFileTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"path": map[string]any{
 				"type":        "string",
-				"description": "Path to the file to read",
+				"description": "File path (relative to workspace, or absolute)",
 			},
 		},
 		"required": []string{"path"},
@@ -93,10 +92,10 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *Result
 	}
 
 	// Group read restriction: block non-writers from reading SOUL.md/AGENTS.md
-	if t.groupWriterCache != nil {
+	if t.permStore != nil {
 		base := filepath.Base(path)
 		if base == bootstrap.SoulFile || base == bootstrap.AgentsFile {
-			if err := store.CheckGroupWritePermission(ctx, t.groupWriterCache); err != nil {
+			if err := store.CheckFileWriterPermission(ctx, t.permStore); err != nil {
 				return ErrorResult(fmt.Sprintf("permission denied: %s is restricted in this group", base))
 			}
 		}
@@ -146,7 +145,8 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *Result
 	if workspace == "" {
 		workspace = t.workspace
 	}
-	resolved, err := resolvePathWithAllowed(path, workspace, effectiveRestrict(ctx, t.restrict), t.allowedPrefixes)
+	allowed := allowedWithTeamWorkspace(ctx, t.allowedPrefixes)
+	resolved, err := resolvePathWithAllowed(path, workspace, effectiveRestrict(ctx, t.restrict), allowed)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
@@ -154,58 +154,65 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *Result
 		return ErrorResult(err.Error())
 	}
 
+	// Block binary files — reading them wastes context with garbled data.
+	if isBinaryFileExt(resolved) {
+		ext := strings.ToLower(filepath.Ext(resolved))
+		return ErrorResult(fmt.Sprintf("cannot read binary file (%s). Use the appropriate tool: read_image for images, read_document for documents, read_audio for audio, read_video for video.", ext))
+	}
+
 	data, err := os.ReadFile(resolved)
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("failed to read file: %v", err))
+		msg := fmt.Sprintf("failed to read file: %v", err)
+		if os.IsNotExist(err) {
+			if teamWs := ToolTeamWorkspaceFromCtx(ctx); teamWs != "" && !strings.HasPrefix(resolved, teamWs) {
+				msg += fmt.Sprintf("\nHint: file may be in the team workspace. Try: read_file(path=\"%s/%s\")", teamWs, path)
+			}
+		}
+		return ErrorResult(msg)
 	}
 
 	return SilentResult(string(data))
 }
 
 func (t *ReadFileTool) executeInSandbox(ctx context.Context, path, sandboxKey string) *Result {
-	// Map effective workspace to container path
-	workspace := ToolWorkspaceFromCtx(ctx)
-	if workspace == "" {
-		workspace = t.workspace
-	}
-
-	containerCwd, err := MapHostPathToSandbox(ctx, workspace, t.workspace)
-	if err != nil {
-		return ErrorResult(fmt.Sprintf("sandbox read: %v", err))
-	}
-
-	// Resolve the requested 'path' relative to the agent's container workdir.
-	containerPath := path
-	if !filepath.IsAbs(path) {
-		containerPath = filepath.Join(containerCwd, path)
-	}
-
 	bridge, err := t.getFsBridge(ctx, sandboxKey)
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("sandbox error: %v", err))
 	}
 
+	containerCwd, cwdErr := SandboxCwd(ctx, t.workspace, sandbox.DefaultContainerWorkdir)
+	if cwdErr != nil {
+		return ErrorResult(fmt.Sprintf("sandbox path mapping: %v", cwdErr))
+	}
+	containerPath := ResolveSandboxPath(path, containerCwd)
+
 	data, err := bridge.ReadFile(ctx, containerPath)
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("failed to read file: %v", err))
+		return ErrorResult(fmt.Sprintf("failed to read file: %v", err) + MaybeFsBridgeHint(err))
 	}
 
 	return SilentResult(data)
 }
 
 func (t *ReadFileTool) getFsBridge(ctx context.Context, sandboxKey string) (*sandbox.FsBridge, error) {
-	if netEnabled := ToolSandboxNetworkFromCtx(ctx); netEnabled {
-		ctx = sandbox.WithNetworkOverride(ctx, true)
-	}
 	sb, err := t.sandboxMgr.Get(ctx, sandboxKey, t.workspace, SandboxConfigFromCtx(ctx))
 	if err != nil {
 		return nil, err
 	}
-	containerDir := ToolSandboxDirFromCtx(ctx)
-	if containerDir == "" {
-		containerDir = "/workspace" // fallback
+	return sandbox.NewFsBridge(sb.ID(), sandbox.DefaultContainerWorkdir), nil
+}
+
+// allowedWithTeamWorkspace returns the allowed prefixes with team workspace appended
+// if present in context. Thread-safe: creates a new slice per request.
+func allowedWithTeamWorkspace(ctx context.Context, base []string) []string {
+	teamWs := ToolTeamWorkspaceFromCtx(ctx)
+	if teamWs == "" {
+		return base
 	}
-	return sandbox.NewFsBridge(sb.ID(), containerDir), nil
+	out := make([]string, len(base)+1)
+	copy(out, base)
+	out[len(base)] = teamWs
+	return out
 }
 
 // resolvePathWithAllowed is like resolvePath but also allows paths under extra prefixes.
@@ -263,6 +270,29 @@ func checkDeniedPath(resolved, workspace string, deniedPrefixes []string) error 
 		}
 	}
 	return nil
+}
+
+// binaryFileExts are file extensions that should not be read as text.
+// Reading these wastes context with garbled binary data.
+var binaryFileExts = map[string]bool{
+	// Images
+	".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true,
+	".bmp": true, ".ico": true, ".tiff": true, ".tif": true,
+	// Audio
+	".mp3": true, ".wav": true, ".ogg": true, ".flac": true, ".aac": true, ".m4a": true,
+	// Video
+	".mp4": true, ".avi": true, ".mov": true, ".mkv": true, ".webm": true,
+	// Archives
+	".zip": true, ".tar": true, ".gz": true, ".bz2": true, ".7z": true, ".rar": true,
+	// Documents (binary)
+	".pdf": true, ".docx": true, ".xlsx": true, ".pptx": true,
+	// Executables
+	".exe": true, ".dll": true, ".so": true, ".dylib": true,
+}
+
+// isBinaryFileExt returns true if the file extension indicates a binary file.
+func isBinaryFileExt(path string) bool {
+	return binaryFileExts[strings.ToLower(filepath.Ext(path))]
 }
 
 // resolvePath resolves a path relative to the workspace and validates it.

@@ -36,7 +36,7 @@ func (h *AgentsHandler) handleListShares(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"shares": shares})
+	writeJSON(w, http.StatusOK, map[string]any{"shares": shares})
 }
 
 func (h *AgentsHandler) handleShare(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +84,7 @@ func (h *AgentsHandler) handleShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	emitAudit(h.msgBus, r, "agent.shared", "agent", id.String())
 	writeJSON(w, http.StatusCreated, map[string]string{"ok": "true"})
 }
 
@@ -117,6 +118,7 @@ func (h *AgentsHandler) handleRevokeShare(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	emitAudit(h.msgBus, r, "agent.share_revoked", "agent", id.String())
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
@@ -168,6 +170,7 @@ func (h *AgentsHandler) handleRegenerate(w http.ResponseWriter, r *http.Request)
 
 	go h.summoner.RegenerateAgent(id, ag.Provider, ag.Model, req.Prompt)
 
+	emitAudit(h.msgBus, r, "agent.regenerated", "agent", id.String())
 	writeJSON(w, http.StatusAccepted, map[string]string{"ok": "true", "status": store.AgentStatusSummoning})
 }
 
@@ -213,6 +216,7 @@ func (h *AgentsHandler) handleResummon(w http.ResponseWriter, r *http.Request) {
 
 	go h.summoner.SummonAgent(id, ag.Provider, ag.Model, description)
 
+	emitAudit(h.msgBus, r, "agent.resummoned", "agent", id.String())
 	writeJSON(w, http.StatusAccepted, map[string]string{"ok": "true", "status": store.AgentStatusSummoning})
 }
 
@@ -221,7 +225,7 @@ func extractDescription(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
-	var cfg map[string]interface{}
+	var cfg map[string]any
 	if json.Unmarshal(raw, &cfg) != nil {
 		return ""
 	}
@@ -229,7 +233,7 @@ func extractDescription(raw json.RawMessage) string {
 	return desc
 }
 
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
+func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)

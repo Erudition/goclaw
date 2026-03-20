@@ -8,9 +8,15 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
+	"github.com/nextlevelbuilder/goclaw/internal/permissions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
+
+// skillOwnerGetter is an optional interface for stores that can return a skill's owner ID.
+type skillOwnerGetter interface {
+	GetSkillOwnerID(id uuid.UUID) (string, bool)
+}
 
 // SkillsMethods handles skills.list, skills.get, skills.update.
 type SkillsMethods struct {
@@ -38,6 +44,8 @@ func (m *SkillsMethods) handleList(_ context.Context, client *gateway.Client, re
 			"description": s.Description,
 			"source":      s.Source,
 			"version":     s.Version,
+			"is_system":   s.IsSystem,
+			"enabled":     s.Enabled,
 		}
 		if s.ID != "" {
 			entry["id"] = s.ID
@@ -47,6 +55,15 @@ func (m *SkillsMethods) handleList(_ context.Context, client *gateway.Client, re
 		}
 		if len(s.Tags) > 0 {
 			entry["tags"] = s.Tags
+		}
+		if s.Status != "" {
+			entry["status"] = s.Status
+		}
+		if s.Author != "" {
+			entry["author"] = s.Author
+		}
+		if len(s.MissingDeps) > 0 {
+			entry["missing_deps"] = s.MissingDeps
 		}
 		result = append(result, entry)
 	}
@@ -153,6 +170,16 @@ func (m *SkillsMethods) handleUpdate(ctx context.Context, client *gateway.Client
 	if params.Updates == nil || len(params.Updates) == 0 {
 		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "updates")))
 		return
+	}
+
+	// Ownership check: only skill owner or admin can update
+	if !permissions.HasMinRole(client.Role(), permissions.RoleAdmin) {
+		if ownerGetter, ok := m.store.(skillOwnerGetter); ok {
+			if ownerID, found := ownerGetter.GetSkillOwnerID(skillID); found && ownerID != client.UserID() {
+				client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrUnauthorized, i18n.T(locale, i18n.MsgPermissionDenied, "skills.update")))
+				return
+			}
+		}
 	}
 
 	if err := updater.UpdateSkill(skillID, params.Updates); err != nil {

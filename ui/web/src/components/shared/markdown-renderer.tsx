@@ -1,10 +1,17 @@
 import { useState, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { useClipboard } from "@/hooks/use-clipboard";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, Download, FileText } from "lucide-react";
 import { ImageLightbox } from "./image-lightbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 function CodeBlock({
   className,
@@ -14,24 +21,25 @@ function CodeBlock({
   children?: React.ReactNode;
 }) {
   const { copied, copy } = useClipboard();
+  const { t } = useTranslation("common");
   const text = String(children).replace(/\n$/, "");
   const lang = className?.replace("language-", "") ?? "";
 
   return (
-    <div className="not-prose group relative my-4 overflow-hidden rounded-md border">
-      <div className="flex items-center justify-between bg-muted px-3 py-1 text-xs text-muted-foreground">
+    <div className="not-prose group relative my-6 overflow-hidden rounded-lg border border-border/60">
+      <div className="flex items-center justify-between border-b border-border/40 bg-muted/70 px-3 py-1.5 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
         <span>{lang || "code"}</span>
         <button
           type="button"
           onClick={() => copy(text)}
           className="cursor-pointer opacity-0 transition-opacity group-hover:opacity-100"
-          title="Copy code"
+          title={t("copyCode")}
         >
           {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
         </button>
       </div>
-      <pre className="overflow-x-auto bg-muted/50 p-4 text-sm text-foreground">
-        <code className={className}>{children}</code>
+      <pre className="overflow-x-auto bg-muted/30 p-4 text-[13px] leading-relaxed text-foreground whitespace-pre">
+        <code className={className} style={{ fontFamily: "'JetBrains Mono', 'Fira Code', ui-monospace, monospace", wordWrap: "normal", overflowWrap: "normal" }}>{children}</code>
       </pre>
     </div>
   );
@@ -42,12 +50,53 @@ interface MarkdownRendererProps {
   className?: string;
 }
 
+/** Check if a URL points to a local file via /v1/files/ endpoint */
+function isFileLink(href: string | undefined): boolean {
+  return !!href && (href.startsWith("/v1/files/") || href.includes("/v1/files/"));
+}
+
+/** File type detection from name */
+function isMarkdownExt(name: string): boolean {
+  return /\.(md|mdx|markdown)$/i.test(name);
+}
+function isMediaFile(name: string): "image" | "audio" | "video" | null {
+  if (/\.(jpg|jpeg|png|gif|webp|svg|bmp|ico)$/i.test(name)) return "image";
+  if (/\.(mp3|wav|ogg|flac|aac|m4a|wma|opus)$/i.test(name)) return "audio";
+  if (/\.(mp4|webm|mkv|avi|mov|wmv)$/i.test(name)) return "video";
+  return null;
+}
+
+/** Extract filename from /v1/files/ URL */
+function fileNameFromHref(href: string): string {
+  const path = href.split("?")[0] ?? href;
+  const segments = path.split("/");
+  return segments[segments.length - 1] ?? "file";
+}
+
 export function MarkdownRenderer({ content, className }: MarkdownRendererProps) {
   const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
   const openLightbox = useCallback((src: string, alt: string) => setLightbox({ src, alt }), []);
+  const [filePreview, setFilePreview] = useState<{ name: string; href: string; content: string; mediaType?: "image" | "audio" | "video" } | null>(null);
+  const [fileLoading, setFileLoading] = useState(false);
+
+  const handleFileClick = useCallback((href: string, name: string) => {
+    // Media files: open preview directly without fetching text content
+    const media = isMediaFile(name);
+    if (media) {
+      setFilePreview({ name, href, content: "", mediaType: media });
+      return;
+    }
+    // Text/code files: fetch content
+    setFileLoading(true);
+    fetch(href)
+      .then((res) => res.text())
+      .then((text) => setFilePreview({ name, href, content: text }))
+      .catch(() => window.open(href, "_blank"))
+      .finally(() => setFileLoading(false));
+  }, []);
 
   return (
-    <div className={`prose prose-sm dark:prose-invert max-w-none break-words ${className ?? ""}`}>
+    <div className={`md-render prose dark:prose-invert max-w-none break-words ${className ?? ""}`}>
       {lightbox && (
         <ImageLightbox src={lightbox.src} alt={lightbox.alt} onClose={() => setLightbox(null)} />
       )}
@@ -59,20 +108,44 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
             // Strip the outer <pre> from ReactMarkdown — CodeBlock renders its own
             return <>{children}</>;
           },
-          code({ className, children, ...props }) {
-            const isInline = !className;
-            if (isInline) {
+          code({ className, children, node, ...props }) {
+            // Block code: has className OR parent is <pre>
+            const isBlock = !!className || node?.position?.start.line !== node?.position?.end.line || String(children).includes("\n");
+            if (isBlock) {
+              return <CodeBlock className={className}>{children}</CodeBlock>;
+            }
+            return (
+              <code className="rounded bg-muted px-1.5 py-0.5 text-[0.85em] font-medium text-primary" style={{ fontFamily: "'JetBrains Mono', 'Fira Code', ui-monospace, monospace" }} {...props}>
+                {children}
+              </code>
+            );
+          },
+          a({ href, children }) {
+            if (isFileLink(href)) {
+              const name = typeof children === "string" ? children : fileNameFromHref(href ?? "");
               return (
-                <code className="rounded bg-muted px-1.5 py-0.5 text-sm" {...props}>
-                  {children}
-                </code>
+                <span className="inline-flex items-center gap-0.5 rounded border bg-muted/50 text-[0.85em] font-medium">
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 px-1.5 py-0.5 text-primary hover:bg-muted cursor-pointer rounded-l"
+                    onClick={(e) => { e.preventDefault(); handleFileClick(href!, name); }}
+                  >
+                    <FileText className="h-3.5 w-3.5" />
+                    {children}
+                  </button>
+                  <a
+                    href={href}
+                    download={name}
+                    className="inline-flex items-center px-1 py-0.5 text-muted-foreground hover:bg-muted cursor-pointer rounded-r border-l"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <Download className="h-3 w-3" />
+                  </a>
+                </span>
               );
             }
-            return <CodeBlock className={className}>{children}</CodeBlock>;
-          },
-          a({ href, children, ...props }) {
             return (
-              <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+              <a href={href} target="_blank" rel="noopener noreferrer">
                 {children}
               </a>
             );
@@ -94,19 +167,32 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
           },
           table({ children, ...props }) {
             return (
-              <div className="my-2 overflow-x-auto">
-                <table className="w-full border-collapse text-sm" {...props}>{children}</table>
+              <div className="not-prose my-4 overflow-x-auto">
+                <table className="w-full border-collapse text-[13px]" {...props}>{children}</table>
               </div>
             );
           },
           thead({ children, ...props }) {
-            return <thead className="border-b bg-muted/50" {...props}>{children}</thead>;
+            return <thead {...props}>{children}</thead>;
           },
           th({ children, ...props }) {
-            return <th className="px-3 py-2 text-left font-medium" {...props}>{children}</th>;
+            return <th className="border border-border bg-muted px-3 py-1.5 text-left text-[13px] font-semibold" {...props}>{children}</th>;
           },
           td({ children, ...props }) {
-            return <td className="border-t px-3 py-2" {...props}>{children}</td>;
+            return <td className="border border-border px-3 py-1.5" {...props}>{children}</td>;
+          },
+          tr({ children, ...props }) {
+            return <tr className="even:bg-muted/30" {...props}>{children}</tr>;
+          },
+          blockquote({ children, ...props }) {
+            return (
+              <blockquote className="my-4 border-l-4 border-muted-foreground rounded-r-md bg-muted px-4 py-3 text-muted-foreground not-italic" {...props}>
+                {children}
+              </blockquote>
+            );
+          },
+          hr({ ...props }) {
+            return <hr className="my-6 border-none h-0.5 bg-border" {...props} />;
           },
           input({ type, checked, ...props }) {
             if (type === "checkbox") {
@@ -118,6 +204,43 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
       >
         {content}
       </ReactMarkdown>
+
+      {fileLoading && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/50">
+          <div className="h-6 w-6 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
+        </div>
+      )}
+
+      <Dialog open={!!filePreview} onOpenChange={(open) => { if (!open) setFilePreview(null); }}>
+        {filePreview && (
+          <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
+            <DialogHeader className="flex-row items-center justify-between gap-2">
+              <DialogTitle className="truncate text-base">{filePreview.name}</DialogTitle>
+              <a
+                href={filePreview.href}
+                download={filePreview.name}
+                className="mr-8 flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Download
+              </a>
+            </DialogHeader>
+            <div className="min-h-0 flex-1 overflow-y-auto rounded-md border bg-muted/20 p-4">
+              {filePreview.mediaType === "image" ? (
+                <img src={filePreview.href} alt={filePreview.name} className="max-w-full rounded" />
+              ) : filePreview.mediaType === "audio" ? (
+                <audio controls src={filePreview.href} className="w-full" />
+              ) : filePreview.mediaType === "video" ? (
+                <video controls src={filePreview.href} className="max-w-full rounded" />
+              ) : isMarkdownExt(filePreview.name) ? (
+                <MarkdownRenderer content={filePreview.content} />
+              ) : (
+                <pre className="whitespace-pre-wrap text-xs font-mono"><code>{filePreview.content}</code></pre>
+              )}
+            </div>
+          </DialogContent>
+        )}
+      </Dialog>
     </div>
   );
 }

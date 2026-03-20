@@ -17,7 +17,7 @@ func makeSchedulerRunFunc(agents *agent.Router, cfg *config.Config) scheduler.Ru
 		// Extract agentID from session key.
 		// Supported formats:
 		//   agent:{agentId}:{rest}
-		//   delegate:{sourceUUID8}:{targetAgentKey}:{delegationId}
+		//   delegate:{sourceUUID8}:{targetAgentKey}:{delegationId}  (legacy, kept for existing sessions)
 		agentID := cfg.ResolveDefaultAgentID()
 		if parts := strings.SplitN(req.SessionKey, ":", 4); len(parts) >= 2 {
 			switch parts[0] {
@@ -40,10 +40,11 @@ func makeSchedulerRunFunc(agents *agent.Router, cfg *config.Config) scheduler.Ru
 		// The ctx from the scheduler is already cancellable; we create a child so the router's
 		// cancel func is independent from the scheduler's cancel func. Calling cancel twice is safe.
 		runCtx, cancel := context.WithCancel(ctx)
-		agents.RegisterRun(req.RunID, req.SessionKey, agentID, cancel)
+		injectCh := agents.RegisterRun(req.RunID, req.SessionKey, agentID, cancel)
 		defer agents.UnregisterRun(req.RunID)
 		defer cancel()
 
+		req.InjectCh = injectCh
 		return loop.Run(runCtx, req)
 	}
 }

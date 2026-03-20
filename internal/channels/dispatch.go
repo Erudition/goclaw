@@ -48,6 +48,26 @@ func (m *Manager) dispatchOutbound(ctx context.Context) {
 				continue
 			}
 
+			// Filter out temp media files that no longer exist (already sent by another dispatch).
+			if len(msg.Media) > 0 {
+				tmpDir := os.TempDir()
+				filtered := msg.Media[:0]
+				for _, media := range msg.Media {
+					if media.URL != "" && strings.HasPrefix(media.URL, tmpDir) {
+						if _, err := os.Stat(media.URL); err != nil {
+							slog.Debug("skipping already-delivered temp media", "path", media.URL)
+							continue
+						}
+					}
+					filtered = append(filtered, media)
+				}
+				msg.Media = filtered
+				// If only media was in this message and all files are gone, skip entirely.
+				if len(msg.Media) == 0 && msg.Content == "" {
+					continue
+				}
+			}
+
 			if err := channel.Send(ctx, msg); err != nil {
 				slog.Error("error sending message to channel",
 					"channel", msg.Channel,
@@ -70,10 +90,11 @@ func (m *Manager) dispatchOutbound(ctx context.Context) {
 				}
 			}
 
-			// Clean up temporary media files after successful (or failed) send.
-			// Files are created by tools (create_image, tts) and only needed for the send.
+			// Clean up temp media files only. Workspace-generated files are preserved
+			// so they remain accessible via workspace/web UI after delivery.
+			tmpDir := os.TempDir()
 			for _, media := range msg.Media {
-				if media.URL != "" {
+				if media.URL != "" && strings.HasPrefix(media.URL, tmpDir) {
 					if err := os.Remove(media.URL); err != nil {
 						slog.Debug("failed to clean up media file", "path", media.URL, "error", err)
 					}

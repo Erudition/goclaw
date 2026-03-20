@@ -117,12 +117,16 @@ func (c Config) ShouldSandbox(agentID string) bool {
 	}
 }
 
+// DefaultContainerWorkdir is the default container-side working directory
+// used when no custom Workdir is configured.
+const DefaultContainerWorkdir = "/workspace"
+
 // ContainerWorkdir returns the container-side working directory.
 func (c Config) ContainerWorkdir() string {
 	if c.Workdir != "" {
 		return c.Workdir
 	}
-	return "/workspace"
+	return DefaultContainerWorkdir
 }
 
 // ResolveScopeKey maps a session key to a sandbox scope key.
@@ -153,10 +157,34 @@ type ExecResult struct {
 	Stderr   string `json:"stderr"`
 }
 
+// ExecOption configures optional behavior for sandbox Exec calls.
+type ExecOption func(*ExecOpts)
+
+// ExecOpts holds optional settings applied via ExecOption.
+type ExecOpts struct {
+	Env map[string]string // extra env vars injected into the container exec
+}
+
+// WithEnv injects additional environment variables into the sandbox exec call.
+// Used by credentialed exec to pass credentials without shell interpretation.
+func WithEnv(env map[string]string) ExecOption {
+	return func(o *ExecOpts) { o.Env = env }
+}
+
+// ApplyExecOpts resolves variadic ExecOption into ExecOpts.
+func ApplyExecOpts(opts []ExecOption) ExecOpts {
+	var o ExecOpts
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
 // Sandbox is the interface for sandboxed code execution.
 type Sandbox interface {
 	// Exec runs a command inside the sandbox and returns the result.
-	Exec(ctx context.Context, command []string, workDir string) (*ExecResult, error)
+	// Optional ExecOption (e.g. WithEnv) configures per-call behavior.
+	Exec(ctx context.Context, command []string, workDir string, opts ...ExecOption) (*ExecResult, error)
 
 	// Destroy removes the sandbox container and cleans up resources.
 	Destroy(ctx context.Context) error

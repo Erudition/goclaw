@@ -15,8 +15,9 @@ type SessionData struct {
 	Created  time.Time           `json:"created"`
 	Updated  time.Time           `json:"updated"`
 
-	AgentUUID uuid.UUID `json:"agentUUID,omitempty"` // DB agent UUID
-	UserID    string    `json:"userID,omitempty"`    // External user ID (e.g. Telegram user ID)
+	AgentUUID uuid.UUID  `json:"agentUUID,omitempty"` // DB agent UUID
+	UserID    string     `json:"userID,omitempty"`    // External user ID (e.g. Telegram user ID)
+	TeamID    *uuid.UUID `json:"teamID,omitempty"`    // Team UUID (set for team sessions)
 
 	Model                      string `json:"model,omitempty"`
 	Provider                   string `json:"provider,omitempty"`
@@ -52,6 +53,8 @@ type SessionInfo struct {
 // SessionListOpts holds pagination options for ListPaged.
 type SessionListOpts struct {
 	AgentID string
+	Channel string // optional: filter by channel prefix ("ws", "telegram", etc.)
+	UserID  string // optional: filter by user_id
 	Limit   int
 	Offset  int
 }
@@ -88,6 +91,7 @@ type SessionStore interface {
 	GetHistory(key string) []providers.Message
 	GetSummary(key string) string
 	SetSummary(key, summary string)
+	GetLabel(key string) string
 	SetLabel(key, label string)
 	SetAgentInfo(key string, agentUUID uuid.UUID, userID string)
 	UpdateMetadata(key, model, provider, channel string)
@@ -96,6 +100,7 @@ type SessionStore interface {
 	GetCompactionCount(key string) int
 	GetMemoryFlushCompactionCount(key string) int
 	SetMemoryFlushDone(key string)
+	GetSessionMetadata(key string) map[string]string
 	SetSessionMetadata(key string, metadata map[string]string)
 	SetSpawnInfo(key, spawnedBy string, depth int)
 	SetContextWindow(key string, cw int)

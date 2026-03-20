@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -23,13 +24,16 @@ type Channel struct {
 	*channels.BaseChannel
 	bot              *telego.Bot
 	config           config.TelegramConfig
+	httpClient       *http.Client
+	transport        *http.Transport
+	ipv4Once         sync.Once          // guards enableIPv4Only to prevent data race
 	pairingService   store.PairingStore
-	agentStore       store.AgentStore // for group file writer management (nil if not configured)
-	teamStore        store.TeamStore  // for /tasks, /task_detail commands (nil if not configured)
+	agentStore      store.AgentStore              // for agent key lookup (nil if not configured)
+	configPermStore store.ConfigPermissionStore   // for group file writer management (nil if not configured)
+	teamStore       store.TeamStore               // for /tasks, /task_detail commands (nil if not configured)
 	placeholders     sync.Map         // localKey string → messageID int
 	stopThinking     sync.Map         // localKey string → *thinkingCancel
 	typingCtrls      sync.Map         // localKey string → *typing.Controller
-	streams          sync.Map         // localKey string → *DraftStream (streaming preview)
 	reactions        sync.Map         // localKey string → *StatusReactionController
 	pairingReplySent sync.Map         // userID string → time.Time (debounce pairing replies)
 	threadIDs        sync.Map         // localKey string → messageThreadID int (for forum topic routing)
@@ -54,21 +58,39 @@ func (c *thinkingCancel) Cancel() {
 // New creates a new Telegram channel from config.
 // pairingSvc is optional (nil = fall back to allowlist only).
 // agentStore is optional (nil = group file writer commands disabled).
+// configPermStore is optional (nil = group file writer commands disabled).
 // teamStore is optional (nil = /tasks, /task_detail commands disabled).
-func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.PairingStore, agentStore store.AgentStore, teamStore store.TeamStore, pendingStore store.PendingMessageStore) (*Channel, error) {
+func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.PairingStore, agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, pendingStore store.PendingMessageStore) (*Channel, error) {
 	var opts []telego.BotOption
+
+	if cfg.APIServer != "" {
+		opts = append(opts, telego.WithAPIServer(cfg.APIServer))
+	}
+
+	// Isolate transport per account: prevents cross-bot connection pool contention
+	// and allows per-account IPv4 fallback without affecting other bots.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = 64 // default 2 is too low for high-concurrency bots
 
 	if cfg.Proxy != "" {
 		proxyURL, parseErr := url.Parse(cfg.Proxy)
 		if parseErr != nil {
 			return nil, fmt.Errorf("invalid proxy URL %q: %w", cfg.Proxy, parseErr)
 		}
-		opts = append(opts, telego.WithHTTPClient(&http.Client{
-			Transport: &http.Transport{
-				Proxy: http.ProxyURL(proxyURL),
-			},
-		}))
+		transport.Proxy = http.ProxyURL(proxyURL)
 	}
+
+	httpClient := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+	}
+	// Apply ForceIPv4 at init if configured (explicit, predictable, no runtime heuristic).
+	if cfg.ForceIPv4 {
+		applyIPv4Dialer(transport)
+		slog.Info("telegram: forced IPv4 for account via config")
+	}
+
+	opts = append(opts, telego.WithHTTPClient(httpClient))
 
 	bot, err := telego.NewBot(cfg.Token, opts...)
 	if err != nil {
@@ -89,15 +111,18 @@ func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.Pai
 	}
 
 	return &Channel{
-		BaseChannel:    base,
-		bot:            bot,
-		config:         cfg,
-		pairingService: pairingSvc,
-		agentStore:     agentStore,
-		teamStore:      teamStore,
-		groupHistory:   channels.MakeHistory(channels.TypeTelegram, pendingStore),
-		historyLimit:   historyLimit,
-		requireMention: requireMention,
+		BaseChannel:     base,
+		bot:             bot,
+		config:          cfg,
+		httpClient:      httpClient,
+		transport:       transport,
+		pairingService:  pairingSvc,
+		agentStore:      agentStore,
+		configPermStore: configPermStore,
+		teamStore:       teamStore,
+		groupHistory:    channels.MakeHistory(channels.TypeTelegram, pendingStore),
+		historyLimit:    historyLimit,
+		requireMention:  requireMention,
 	}, nil
 }
 
@@ -132,12 +157,15 @@ func (c *Channel) Start(ctx context.Context) error {
 	// Register bot menu commands with retry.
 	go func() {
 		commands := DefaultMenuCommands()
+		syncCtx, cancel := context.WithTimeout(pollCtx, probeOverallTimeout)
+		defer cancel()
+
 		for attempt := 1; attempt <= 3; attempt++ {
-			if err := c.SyncMenuCommands(pollCtx, commands); err != nil {
+			if err := c.SyncMenuCommands(syncCtx, commands); err != nil {
 				slog.Warn("failed to sync telegram menu commands", "error", err, "attempt", attempt)
 				if attempt < 3 {
 					select {
-					case <-pollCtx.Done():
+					case <-syncCtx.Done():
 						return
 					case <-time.After(time.Duration(attempt*5) * time.Second):
 					}
@@ -189,18 +217,33 @@ func (c *Channel) Start(ctx context.Context) error {
 // StreamEnabled reports whether streaming is active for the given chat type.
 // Controlled by separate dm_stream / group_stream config flags (both default false).
 //
-// DM streaming: edits "Thinking..." placeholder progressively via editMessageText.
+// DM streaming: uses sendMessageDraft (stealth preview) by default, falls back to
+// sendMessage+editMessageText if draft API is unavailable. Controlled by draft_transport config.
 // Group streaming: sends a new message, edits progressively, hands off to Send().
-//
-// Both are disabled by default. sendMessageDraft (draft transport) code exists in the
-// codebase but is not used pending Telegram client-side fixes:
-//   - tdesktop#10315, bugs.telegram.org/c/561 — "reply to deleted message" artifacts
-//   - openclaw/openclaw#7803, openclaw/openclaw#32180 — community tracking
 func (c *Channel) StreamEnabled(isGroup bool) bool {
 	if isGroup {
 		return c.config.GroupStream != nil && *c.config.GroupStream
 	}
 	return c.config.DMStream != nil && *c.config.DMStream
+}
+
+// draftTransportEnabled returns whether sendMessageDraft should be used for DM streaming.
+// Default: false (disabled). When enabled, uses stealth preview with no per-edit notifications,
+// but may cause "reply to deleted message" artifacts on some Telegram clients (tdesktop#10315).
+func (c *Channel) draftTransportEnabled() bool {
+	if c.config.DraftTransport == nil {
+		return false
+	}
+	return *c.config.DraftTransport
+}
+
+// ReasoningStreamEnabled returns whether reasoning should be shown as a separate message.
+// Default: true. Set "reasoning_stream": false to hide reasoning (only show answer).
+func (c *Channel) ReasoningStreamEnabled() bool {
+	if c.config.ReasoningStream == nil {
+		return true
+	}
+	return *c.config.ReasoningStream
 }
 
 // BlockReplyEnabled returns the per-channel block_reply override (nil = inherit gateway default).
@@ -232,8 +275,33 @@ func (c *Channel) Stop(_ context.Context) error {
 			slog.Warn("telegram polling goroutine did not exit within timeout")
 		}
 	}
-
 	return nil
+}
+
+// applyIPv4Dialer forces a transport to use IPv4 only by overriding DialContext.
+func applyIPv4Dialer(t *http.Transport) {
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if network == "tcp" {
+			network = "tcp4"
+		}
+		return dialer.DialContext(ctx, network, addr)
+	}
+}
+
+// enableIPv4Only forces the bot's transport to use IPv4 only for all future
+// requests. Safe to call from multiple goroutines concurrently (uses sync.Once).
+func (c *Channel) enableIPv4Only() {
+	if c == nil || c.transport == nil {
+		return
+	}
+	c.ipv4Once.Do(func() {
+		applyIPv4Dialer(c.transport)
+		slog.Info("telegram: enabled sticky IPv4 fallback", "bot", c.bot.Username())
+	})
 }
 
 // parseChatID converts a string chat ID to int64.

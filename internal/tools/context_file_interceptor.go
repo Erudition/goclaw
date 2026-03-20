@@ -34,6 +34,7 @@ var contextFileSet = map[string]bool{
 	bootstrap.UserFile:           true,
 	bootstrap.UserPredefinedFile: true,
 	bootstrap.BootstrapFile:      true, // first-run file (deleted after completion)
+	bootstrap.HeartbeatFile:      true, // agent-level heartbeat checklist
 }
 
 // isContextFile checks if a path refers to a workspace-root context file.
@@ -77,7 +78,7 @@ type ContextFileInterceptor struct {
 	agentCache       cache.Cache[[]store.AgentContextFileData] // agent-level files, keyed by agentID.String()
 	userCache        cache.Cache[[]store.AgentContextFileData] // user-level files, keyed by "agentID:userID"
 	ttl              time.Duration
-	groupWriterCache *store.GroupWriterCache // nil = use direct DB call (backward compat)
+	permStore store.ConfigPermissionStore // nil = no group write restriction
 }
 
 // NewContextFileInterceptor creates an interceptor backed by the given agent store.
@@ -96,9 +97,9 @@ func NewContextFileInterceptor(
 	}
 }
 
-// SetGroupWriterCache sets the shared cache for group writer permission checks (defense-in-depth).
-func (b *ContextFileInterceptor) SetGroupWriterCache(c *store.GroupWriterCache) {
-	b.groupWriterCache = c
+// SetConfigPermStore sets the config permission store for group writer permission checks.
+func (b *ContextFileInterceptor) SetConfigPermStore(s store.ConfigPermissionStore) {
+	b.permStore = s
 }
 
 // ReadFile attempts to read a context file from the DB (with cache).
@@ -149,7 +150,7 @@ func (b *ContextFileInterceptor) ReadFile(ctx context.Context, path string) (str
 	// Predefined agent: block reads of shared identity files (SOUL.md, IDENTITY.md, AGENTS.md).
 	// These are already injected into the system prompt — allowing read_file would let the
 	// agent echo their full contents to users, leaking persona configuration.
-	if agentType == store.AgentTypePredefined && fileName != bootstrap.UserFile && fileName != bootstrap.BootstrapFile {
+	if agentType == store.AgentTypePredefined && fileName != bootstrap.UserFile && fileName != bootstrap.BootstrapFile && fileName != bootstrap.HeartbeatFile {
 		return "", true, fmt.Errorf(
 			"this file (%s) is already loaded into your context. You don't need to read it again — refer to your system instructions instead.",
 			fileName,
@@ -161,24 +162,7 @@ func (b *ContextFileInterceptor) ReadFile(ctx context.Context, path string) (str
 }
 
 func (b *ContextFileInterceptor) readAgentFile(ctx context.Context, agentID uuid.UUID, fileName string) (string, bool, error) {
-	key := agentID.String()
-	if files, ok := b.agentCache.Get(ctx, key); ok {
-		for _, f := range files {
-			if f.FileName == fileName {
-				return f.Content, true, nil
-			}
-		}
-		return "", true, nil // cached but file not found
-	}
-
-	// Cache miss → load from DB
-	files, err := b.agentStore.GetAgentContextFiles(ctx, agentID)
-	if err != nil {
-		return "", true, err
-	}
-	b.agentCache.Set(ctx, key, files, b.ttl)
-
-	for _, f := range files {
+	for _, f := range b.cachedAgentFiles(ctx, agentID) {
 		if f.FileName == fileName {
 			return f.Content, true, nil
 		}
@@ -187,35 +171,7 @@ func (b *ContextFileInterceptor) readAgentFile(ctx context.Context, agentID uuid
 }
 
 func (b *ContextFileInterceptor) readUserFile(ctx context.Context, agentID uuid.UUID, userID, fileName string) (string, bool, error) {
-	key := agentID.String() + ":" + userID
-
-	if files, ok := b.userCache.Get(ctx, key); ok {
-		for _, f := range files {
-			if f.FileName == fileName {
-				return f.Content, true, nil
-			}
-		}
-		return "", true, nil
-	}
-
-	// Cache miss → load from DB
-	files, err := b.agentStore.GetUserContextFiles(ctx, agentID, userID)
-	if err != nil {
-		return "", true, err
-	}
-
-	// Convert to AgentContextFileData for unified cache storage
-	cached := make([]store.AgentContextFileData, len(files))
-	for i, f := range files {
-		cached[i] = store.AgentContextFileData{
-			AgentID:  f.AgentID,
-			FileName: f.FileName,
-			Content:  f.Content,
-		}
-	}
-	b.userCache.Set(ctx, key, cached, b.ttl)
-
-	for _, f := range files {
+	for _, f := range b.cachedUserFiles(ctx, agentID, userID) {
 		if f.FileName == fileName {
 			return f.Content, true, nil
 		}
@@ -247,31 +203,25 @@ func (b *ContextFileInterceptor) WriteFile(ctx context.Context, path, content st
 	// Permission check: protected files in group context require allowlist membership.
 	// Exception: during bootstrap onboarding (BOOTSTRAP.md still exists for this user),
 	// USER.md writes are allowed so the bot can complete the first-run ritual.
-	if strings.HasPrefix(userID, "group:") && protectedFileSet[fileName] {
+	if (strings.HasPrefix(userID, "group:") || strings.HasPrefix(userID, "guild:")) && protectedFileSet[fileName] {
 		skipCheck := false
 		if fileName == bootstrap.UserFile && b.hasBootstrapFile(ctx, agentID, userID) {
 			skipCheck = true // onboarding in progress — allow USER.md write
 		}
 		if !skipCheck {
 			senderID := store.SenderIDFromContext(ctx)
-			if senderID != "" {
+			if senderID != "" && b.permStore != nil {
 				numericID := strings.SplitN(senderID, "|", 2)[0]
-				var isWriter bool
-				var err error
-				if b.groupWriterCache != nil {
-					isWriter, err = b.groupWriterCache.IsWriter(ctx, agentID, userID, numericID)
-				} else {
-					isWriter, err = b.agentStore.IsGroupFileWriter(ctx, agentID, userID, numericID)
-				}
+				allowed, err := b.permStore.CheckPermission(ctx, agentID, userID, "file_writer", numericID)
 				if err != nil {
 					slog.Warn("security.group_file_writer_check_failed",
 						"error", err, "sender", numericID, "file", fileName, "group", userID)
-					// fail open: allow write if DB check fails
-				} else if !isWriter {
+					// fail open: allow write if check fails
+				} else if !allowed {
 					return true, fmt.Errorf("permission denied: you are not authorized to modify %s in this group. Ask a group file writer to add you with /addwriter", fileName)
 				}
 			}
-			// senderID empty = system context (cron, subagent) → fail open
+			// senderID empty or no permStore = system context (cron, subagent) → fail open
 		}
 	}
 
@@ -286,9 +236,9 @@ func (b *ContextFileInterceptor) WriteFile(ctx context.Context, path, content st
 		return true, err
 	}
 
-	// Predefined agent: block writes to shared files (only USER.md allowed per-user).
+	// Predefined agent: block writes to shared files (only USER.md + HEARTBEAT.md allowed).
 	// Exception: SOUL.md is allowed when self_evolve is enabled (style/tone evolution).
-	if agentType == store.AgentTypePredefined && fileName != bootstrap.UserFile {
+	if agentType == store.AgentTypePredefined && fileName != bootstrap.UserFile && fileName != bootstrap.HeartbeatFile {
 		allowSoulEvolve := fileName == bootstrap.SoulFile && store.SelfEvolveFromContext(ctx)
 		if !allowSoulEvolve {
 			return true, fmt.Errorf(
@@ -337,13 +287,11 @@ func (b *ContextFileInterceptor) WriteFile(ctx context.Context, path, content st
 
 // LoadContextFiles loads context files for a specific user+agent combination.
 // Used by the agent loop to dynamically resolve context files for system prompt.
+// Uses the same agentCache/userCache as ReadFile — invalidated on WriteFile and pubsub events.
 func (b *ContextFileInterceptor) LoadContextFiles(ctx context.Context, agentID uuid.UUID, userID, agentType string) []bootstrap.ContextFile {
 	// Open agent: all files from user_context_files
 	if agentType == store.AgentTypeOpen && userID != "" {
-		files, err := b.agentStore.GetUserContextFiles(ctx, agentID, userID)
-		if err != nil {
-			return nil
-		}
+		files := b.cachedUserFiles(ctx, agentID, userID)
 		var result []bootstrap.ContextFile
 		for _, f := range files {
 			if f.Content == "" {
@@ -362,11 +310,8 @@ func (b *ContextFileInterceptor) LoadContextFiles(ctx context.Context, agentID u
 
 	// Predefined agent: agent files + override USER.md from user
 	if agentType == store.AgentTypePredefined && userID != "" {
-		agentFiles, err := b.agentStore.GetAgentContextFiles(ctx, agentID)
-		if err != nil {
-			return nil
-		}
-		userFiles, _ := b.agentStore.GetUserContextFiles(ctx, agentID, userID)
+		agentFiles := b.cachedAgentFiles(ctx, agentID)
+		userFiles := b.cachedUserFiles(ctx, agentID, userID)
 
 		// Build user file map for override lookup
 		userMap := make(map[string]string, len(userFiles))
@@ -411,10 +356,7 @@ func (b *ContextFileInterceptor) LoadContextFiles(ctx context.Context, agentID u
 	}
 
 	// Fallback: agent-level only
-	agentFiles, err := b.agentStore.GetAgentContextFiles(ctx, agentID)
-	if err != nil {
-		return nil
-	}
+	agentFiles := b.cachedAgentFiles(ctx, agentID)
 	var result []bootstrap.ContextFile
 	for _, f := range agentFiles {
 		if f.Content == "" {
@@ -426,6 +368,45 @@ func (b *ContextFileInterceptor) LoadContextFiles(ctx context.Context, agentID u
 		})
 	}
 	return result
+}
+
+// cachedAgentFiles returns agent-level context files, using agentCache.
+// Same cache used by readAgentFile — invalidated by WriteFile and pubsub events.
+func (b *ContextFileInterceptor) cachedAgentFiles(ctx context.Context, agentID uuid.UUID) []store.AgentContextFileData {
+	key := agentID.String()
+	if files, ok := b.agentCache.Get(ctx, key); ok {
+		return files
+	}
+	files, err := b.agentStore.GetAgentContextFiles(ctx, agentID)
+	if err != nil {
+		return nil
+	}
+	b.agentCache.Set(ctx, key, files, b.ttl)
+	return files
+}
+
+// cachedUserFiles returns user-level context files, using userCache.
+// Same cache used by readUserFile — invalidated by WriteFile and pubsub events.
+func (b *ContextFileInterceptor) cachedUserFiles(ctx context.Context, agentID uuid.UUID, userID string) []store.AgentContextFileData {
+	key := agentID.String() + ":" + userID
+	if files, ok := b.userCache.Get(ctx, key); ok {
+		return files
+	}
+	files, err := b.agentStore.GetUserContextFiles(ctx, agentID, userID)
+	if err != nil {
+		return nil
+	}
+	// Convert to AgentContextFileData for unified cache storage
+	cached := make([]store.AgentContextFileData, len(files))
+	for i, f := range files {
+		cached[i] = store.AgentContextFileData{
+			AgentID:  f.AgentID,
+			FileName: f.FileName,
+			Content:  f.Content,
+		}
+	}
+	b.userCache.Set(ctx, key, cached, b.ttl)
+	return cached
 }
 
 // InvalidateAgent clears the cache for a specific agent (called from event handler).

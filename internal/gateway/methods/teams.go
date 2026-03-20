@@ -3,6 +3,7 @@ package methods
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
@@ -20,10 +21,12 @@ type TeamsMethods struct {
 	linkStore   store.AgentLinkStore // for auto-creating bidirectional links
 	agentRouter *agent.Router        // for cache invalidation
 	msgBus      *bus.MessageBus      // for pub/sub cache invalidation
+	eventBus    bus.EventPublisher
+	dataDir     string // workspace data directory for resolving file paths
 }
 
-func NewTeamsMethods(teamStore store.TeamStore, agentStore store.AgentStore, linkStore store.AgentLinkStore, agentRouter *agent.Router, msgBus *bus.MessageBus) *TeamsMethods {
-	return &TeamsMethods{teamStore: teamStore, agentStore: agentStore, linkStore: linkStore, agentRouter: agentRouter, msgBus: msgBus}
+func NewTeamsMethods(teamStore store.TeamStore, agentStore store.AgentStore, linkStore store.AgentLinkStore, agentRouter *agent.Router, msgBus *bus.MessageBus, eventBus bus.EventPublisher, dataDir string) *TeamsMethods {
+	return &TeamsMethods{teamStore: teamStore, agentStore: agentStore, linkStore: linkStore, agentRouter: agentRouter, msgBus: msgBus, eventBus: eventBus, dataDir: dataDir}
 }
 
 // emitTeamCacheInvalidate broadcasts a cache invalidation event for team data.
@@ -43,10 +46,22 @@ func (m *TeamsMethods) Register(router *gateway.MethodRouter) {
 	router.Register(protocol.MethodTeamsGet, m.handleGet)
 	router.Register(protocol.MethodTeamsDelete, m.handleDelete)
 	router.Register(protocol.MethodTeamsTaskList, m.handleTaskList)
+	router.Register(protocol.MethodTeamsTaskApprove, m.handleTaskApprove)
+	router.Register(protocol.MethodTeamsTaskReject, m.handleTaskReject)
 	router.Register(protocol.MethodTeamsMembersAdd, m.handleAddMember)
 	router.Register(protocol.MethodTeamsMembersRemove, m.handleRemoveMember)
 	router.Register(protocol.MethodTeamsUpdate, m.handleUpdate)
 	router.Register(protocol.MethodTeamsKnownUsers, m.handleKnownUsers)
+	router.Register(protocol.MethodTeamsScopes, m.handleScopes)
+
+	// Workspace handlers
+	m.RegisterWorkspace(router)
+
+	// Events handlers
+	router.Register(protocol.MethodTeamsEventsList, m.handleEventsList)
+
+	// Task detail handlers
+	m.RegisterTasks(router)
 }
 
 // --- List ---
@@ -109,6 +124,13 @@ func (m *TeamsMethods) handleCreate(ctx context.Context, client *gateway.Client,
 		return
 	}
 
+	// Enforce single-team leadership: an agent can only lead one team.
+	if existingTeam, _ := m.teamStore.GetTeamForAgent(ctx, leadAgent.ID); existingTeam != nil && existingTeam.LeadAgentID == leadAgent.ID {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest,
+			fmt.Sprintf("agent %q already leads team %q — each agent can only lead one team", params.Lead, existingTeam.Name)))
+		return
+	}
+
 	// Resolve member agents
 	var memberAgents []*store.AgentData
 	for _, memberKey := range params.Members {
@@ -159,6 +181,7 @@ func (m *TeamsMethods) handleCreate(ctx context.Context, client *gateway.Client,
 	// Invalidate agent + team tool caches so TEAM.md gets injected
 	m.invalidateTeamCaches(ctx, team.ID)
 
+	emitAudit(m.eventBus, client, "team.created", "team", team.ID.String())
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"team": team,
 	}))

@@ -38,22 +38,7 @@ func (h *CustomToolsHandler) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (h *CustomToolsHandler) auth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if h.token != "" {
-			if extractBearerToken(r) != h.token {
-				locale := extractLocale(r)
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": i18n.T(locale, i18n.MsgUnauthorized)})
-				return
-			}
-		}
-		userID := extractUserID(r)
-		ctx := store.WithLocale(r.Context(), extractLocale(r))
-		if userID != "" {
-			ctx = store.WithUserID(ctx, userID)
-		}
-		r = r.WithContext(ctx)
-		next(w, r)
-	}
+	return requireAuth(h.token, "", next)
 }
 
 func (h *CustomToolsHandler) emitCacheInvalidate(key string) {
@@ -104,7 +89,7 @@ func (h *CustomToolsHandler) handleList(w http.ResponseWriter, r *http.Request) 
 
 	total, _ := h.store.CountTools(r.Context(), opts)
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"tools":  result,
 		"total":  total,
 		"limit":  opts.Limit,
@@ -152,6 +137,7 @@ func (h *CustomToolsHandler) handleCreate(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	emitAudit(h.msgBus, r, "custom_tool.created", "custom_tool", def.ID.String())
 	h.emitCacheInvalidate(def.ID.String())
 	writeJSON(w, http.StatusCreated, def)
 }
@@ -181,7 +167,7 @@ func (h *CustomToolsHandler) handleUpdate(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var updates map[string]interface{}
+	var updates map[string]any
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&updates); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidJSON)})
 		return
@@ -194,12 +180,16 @@ func (h *CustomToolsHandler) handleUpdate(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// Allowlist: only permit known custom tool columns.
+	updates = filterAllowedKeys(updates, customToolAllowedFields)
+
 	if err := h.store.Update(r.Context(), id, updates); err != nil {
 		slog.Error("custom_tools.update", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
+	emitAudit(h.msgBus, r, "custom_tool.updated", "custom_tool", id.String())
 	h.emitCacheInvalidate(id.String())
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
@@ -218,6 +208,7 @@ func (h *CustomToolsHandler) handleDelete(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	emitAudit(h.msgBus, r, "custom_tool.deleted", "custom_tool", id.String())
 	h.emitCacheInvalidate(id.String())
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

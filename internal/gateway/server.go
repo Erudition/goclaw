@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -46,8 +47,11 @@ type Server struct {
 	channelInstancesHandler *httpapi.ChannelInstancesHandler // channel instance CRUD API
 	providersHandler        *httpapi.ProvidersHandler        // provider CRUD API
 	delegationsHandler      *httpapi.DelegationsHandler      // delegation history API
+	teamEventsHandler       *httpapi.TeamEventsHandler       // team event history API
 	builtinToolsHandler     *httpapi.BuiltinToolsHandler     // builtin tool management API
 	pendingMessagesHandler  *httpapi.PendingMessagesHandler  // pending messages API
+	secureCLIHandler       *httpapi.SecureCLIHandler        // secure CLI credential CRUD API
+	packagesHandler        *httpapi.PackagesHandler         // runtime package management API
 	memoryHandler           *httpapi.MemoryHandler           // memory management API
 	kgHandler               *httpapi.KnowledgeGraphHandler   // knowledge graph API
 	oauthHandler            *httpapi.OAuthHandler            // OAuth endpoints
@@ -57,6 +61,9 @@ type Server struct {
 	mediaServeHandler       *httpapi.MediaServeHandler       // media serve endpoint
 	activityHandler         *httpapi.ActivityHandler         // activity audit log API
 	usageHandler            *httpapi.UsageHandler            // usage analytics API
+	apiKeysHandler     *httpapi.APIKeysHandler      // API key management
+	apiKeyStore        store.APIKeyStore            // for API key auth lookup
+	docsHandler        *httpapi.DocsHandler         // OpenAPI spec + Swagger UI
 	agentStore         store.AgentStore             // for context injection in tools_invoke
 	msgBus             *bus.MessageBus              // for MCP bridge media delivery
 
@@ -193,6 +200,11 @@ func (s *Server) BuildMux() *http.ServeMux {
 		s.customToolsHandler.RegisterRoutes(mux)
 	}
 
+	// Secure CLI credential CRUD API
+	if s.secureCLIHandler != nil {
+		s.secureCLIHandler.RegisterRoutes(mux)
+	}
+
 	// Channel instance CRUD API
 	if s.channelInstancesHandler != nil {
 		s.channelInstancesHandler.RegisterRoutes(mux)
@@ -206,6 +218,11 @@ func (s *Server) BuildMux() *http.ServeMux {
 	// Delegation history API
 	if s.delegationsHandler != nil {
 		s.delegationsHandler.RegisterRoutes(mux)
+	}
+
+	// Team event history API
+	if s.teamEventsHandler != nil {
+		s.teamEventsHandler.RegisterRoutes(mux)
 	}
 
 	// Builtin tool management API
@@ -248,12 +265,25 @@ func (s *Server) BuildMux() *http.ServeMux {
 		s.mediaServeHandler.RegisterRoutes(mux)
 	}
 
+	if s.apiKeysHandler != nil {
+		s.apiKeysHandler.RegisterRoutes(mux)
+	}
+
 	if s.activityHandler != nil {
 		s.activityHandler.RegisterRoutes(mux)
 	}
 
 	if s.usageHandler != nil {
 		s.usageHandler.RegisterRoutes(mux)
+	}
+
+	if s.packagesHandler != nil {
+		s.packagesHandler.RegisterRoutes(mux)
+	}
+
+	// API documentation (OpenAPI spec + Swagger UI)
+	if s.docsHandler != nil {
+		s.docsHandler.RegisterRoutes(mux)
 	}
 
 	// OAuth endpoints (available in all modes)
@@ -294,15 +324,21 @@ func bridgeContextMiddleware(gatewayToken string, next http.Handler) http.Handle
 		peerKind := r.Header.Get("X-Peer-Kind")
 
 		if agentIDStr != "" || userID != "" {
-			// Verify HMAC signature over all context fields when gateway token is configured
-			if gatewayToken != "" {
-				sig := r.Header.Get("X-Bridge-Sig")
-				if !providers.VerifyBridgeContext(gatewayToken, agentIDStr, userID, channel, chatID, peerKind, sig) {
-					slog.Warn("security.mcp_bridge: invalid bridge context signature",
-						"agent_id", agentIDStr, "user_id", userID)
-					http.Error(w, `{"error":"invalid bridge context signature"}`, http.StatusForbidden)
-					return
-				}
+			// Reject context headers when no gateway token — prevents unauthenticated impersonation.
+			if gatewayToken == "" {
+				slog.Warn("security.mcp_bridge: no gateway token, ignoring context headers",
+					"agent_id", agentIDStr, "user_id", userID)
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Verify HMAC signature over all context fields.
+			sig := r.Header.Get("X-Bridge-Sig")
+			if !providers.VerifyBridgeContext(gatewayToken, agentIDStr, userID, channel, chatID, peerKind, sig) {
+				slog.Warn("security.mcp_bridge: invalid bridge context signature",
+					"agent_id", agentIDStr, "user_id", userID)
+				http.Error(w, `{"error":"invalid bridge context signature"}`, http.StatusForbidden)
+				return
 			}
 
 			if agentIDStr != "" {
@@ -334,7 +370,8 @@ func bridgeContextMiddleware(gatewayToken string, next http.Handler) http.Handle
 func tokenAuthMiddleware(token string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != token {
+		provided := strings.TrimPrefix(auth, "Bearer ")
+		if !strings.HasPrefix(auth, "Bearer ") || subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
@@ -446,6 +483,9 @@ func (s *Server) SetProvidersHandler(h *httpapi.ProvidersHandler) { s.providersH
 // SetDelegationsHandler sets the delegation history handler.
 func (s *Server) SetDelegationsHandler(h *httpapi.DelegationsHandler) { s.delegationsHandler = h }
 
+// SetTeamEventsHandler sets the team event history handler.
+func (s *Server) SetTeamEventsHandler(h *httpapi.TeamEventsHandler) { s.teamEventsHandler = h }
+
 // SetPendingMessagesHandler sets the pending messages handler.
 func (s *Server) SetPendingMessagesHandler(h *httpapi.PendingMessagesHandler) {
 	s.pendingMessagesHandler = h
@@ -456,8 +496,20 @@ func (s *Server) SetBuiltinToolsHandler(h *httpapi.BuiltinToolsHandler) {
 	s.builtinToolsHandler = h
 }
 
+// SetSecureCLIHandler sets the secure CLI credential CRUD handler.
+func (s *Server) SetSecureCLIHandler(h *httpapi.SecureCLIHandler) { s.secureCLIHandler = h }
+
+// SetPackagesHandler sets the runtime package management handler.
+func (s *Server) SetPackagesHandler(h *httpapi.PackagesHandler) { s.packagesHandler = h }
+
 // SetOAuthHandler sets the OAuth handler (available in all modes).
 func (s *Server) SetOAuthHandler(h *httpapi.OAuthHandler) { s.oauthHandler = h }
+
+// SetAPIKeysHandler sets the API key management handler.
+func (s *Server) SetAPIKeysHandler(h *httpapi.APIKeysHandler) { s.apiKeysHandler = h }
+
+// SetAPIKeyStore sets the API key store for token-based auth lookup.
+func (s *Server) SetAPIKeyStore(st store.APIKeyStore) { s.apiKeyStore = st }
 
 // SetFilesHandler sets the workspace file serving handler.
 func (s *Server) SetFilesHandler(h *httpapi.FilesHandler) { s.filesHandler = h }
@@ -482,6 +534,9 @@ func (s *Server) SetActivityHandler(h *httpapi.ActivityHandler) { s.activityHand
 
 // SetUsageHandler sets the usage analytics handler.
 func (s *Server) SetUsageHandler(h *httpapi.UsageHandler) { s.usageHandler = h }
+
+// SetDocsHandler sets the OpenAPI spec + Swagger UI handler.
+func (s *Server) SetDocsHandler(h *httpapi.DocsHandler) { s.docsHandler = h }
 
 // SetAgentStore sets the agent store for context injection in tools_invoke.
 func (s *Server) SetAgentStore(as store.AgentStore) { s.agentStore = as }

@@ -54,8 +54,6 @@ export function useChatSend({
         timestamp: Date.now(),
       });
 
-      onExpectRun();
-
       try {
         // Upload files first, then pass path+filename to chat.send
         let mediaItems: { path: string; filename: string }[] | undefined;
@@ -70,7 +68,12 @@ export function useChatSend({
           mediaItems = uploads.map((u) => ({ path: u.path, filename: u.filename }));
         }
 
-        await ws.call<{ runId: string; content: string }>(
+        // Expect a new run BEFORE the call — run.started event fires during ws.call,
+        // not after it returns. For injected sends (agent already running), this is
+        // a no-op since events are already being listened to.
+        onExpectRun();
+
+        const res = await ws.call<{ runId?: string; content?: string; injected?: boolean }>(
           Methods.CHAT_SEND,
           {
             agentId,
@@ -81,6 +84,12 @@ export function useChatSend({
           },
           600_000,
         );
+
+        // If message was injected into running agent, no new run was started.
+        // The running agent will naturally process the injected message.
+        if (res?.injected) {
+          return;
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to send message");
       } finally {

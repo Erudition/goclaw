@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/nextlevelbuilder/goclaw/internal/skills"
+
 	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
@@ -33,7 +35,7 @@ func (h *SkillsHandler) handleListVersions(w http.ResponseWriter, r *http.Reques
 	slugDir := filepath.Join(h.baseDir, slug)
 	entries, err := os.ReadDir(slugDir)
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
+		writeJSON(w, http.StatusOK, map[string]any{
 			"versions": []int{currentVersion},
 			"current":  currentVersion,
 		})
@@ -56,7 +58,7 @@ func (h *SkillsHandler) handleListVersions(w http.ResponseWriter, r *http.Reques
 		versions = []int{currentVersion}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"versions": versions,
 		"current":  currentVersion,
 	})
@@ -110,7 +112,7 @@ func (h *SkillsHandler) handleListFiles(w http.ResponseWriter, r *http.Request) 
 			return nil
 		}
 		// Skip system artifacts (__MACOSX, .DS_Store, etc.)
-		if isSystemArtifact(rel) {
+		if skills.IsSystemArtifact(rel) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -137,7 +139,7 @@ func (h *SkillsHandler) handleListFiles(w http.ResponseWriter, r *http.Request) 
 	if files == nil {
 		files = []fileEntry{}
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"files": files})
+	writeJSON(w, http.StatusOK, map[string]any{"files": files})
 }
 
 // handleReadFile reads a single file from a skill version directory.
@@ -199,7 +201,7 @@ func (h *SkillsHandler) handleReadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Skip system artifacts
-	if isSystemArtifact(relPath) {
+	if skills.IsSystemArtifact(relPath) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": i18n.T(locale, i18n.MsgFileNotFound)})
 		return
 	}
@@ -210,7 +212,7 @@ func (h *SkillsHandler) handleReadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"content": string(data),
 		"path":    relPath,
 		"size":    info.Size(),

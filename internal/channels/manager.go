@@ -2,12 +2,27 @@ package channels
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
+
+// ChannelStream is the per-run streaming handle stored on RunContext.
+// Each channel implementation returns a ChannelStream from CreateStream().
+// RunContext owns the stream so concurrent runs in the same group chat
+// each get their own stream — no sync.Map collision on chatID.
+type ChannelStream interface {
+	// Update sends or edits the streaming message with the latest accumulated text.
+	Update(ctx context.Context, text string)
+	// Stop finalizes the stream (final edit/flush). Called on run.completed.
+	Stop(ctx context.Context) error
+	// MessageID returns the platform message ID of the streaming message (0 if none).
+	// Used to hand the message back to Send() via the channel's placeholder map.
+	MessageID() int
+}
 
 // RunContext tracks an active agent run for streaming/reaction event forwarding.
 type RunContext struct {
@@ -19,8 +34,13 @@ type RunContext struct {
 	BlockReplyEnabled bool              // whether block.reply delivery is enabled for this run (resolved at RegisterRun time)
 	ToolStatusEnabled bool              // whether tool name shows in streaming preview during tool execution
 	mu                sync.Mutex
-	streamBuffer      string // accumulated streaming text (chunks are deltas)
-	inToolPhase       bool   // true after tool.call, reset on next chunk (new LLM iteration)
+	streamBuffer      string        // accumulated streaming text (chunks are deltas)
+	inToolPhase       bool          // true after tool.call, reset on next chunk (new LLM iteration)
+	stream            ChannelStream // per-run stream handle (replaces per-chat sync.Map in channel impls)
+	thinkingBuffer    string        // accumulated thinking/reasoning text
+	hasThinking       bool          // true if any thinking events received this iteration
+	thinkingDone      bool          // true after first chunk arrives (reasoning→answer transition complete)
+	tagParseSkipped   bool          // true after first chunk with no <think> tags (skip re-parsing)
 }
 
 // Manager manages all registered channels, handling their lifecycle
@@ -169,6 +189,21 @@ func (m *Manager) ChannelTypeForName(name string) string {
 		return ch.Type()
 	}
 	return ""
+}
+
+// ListGroupMembers delegates to the channel's GroupMemberProvider if available.
+func (m *Manager) ListGroupMembers(ctx context.Context, channelName, chatID string) ([]GroupMember, error) {
+	m.mu.RLock()
+	ch, ok := m.channels[channelName]
+	m.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("channel %q not found", channelName)
+	}
+	gmp, ok := ch.(GroupMemberProvider)
+	if !ok {
+		return nil, fmt.Errorf("channel %q does not support listing group members", channelName)
+	}
+	return gmp.ListGroupMembers(ctx, chatID)
 }
 
 // UnregisterChannel removes a channel from the manager.

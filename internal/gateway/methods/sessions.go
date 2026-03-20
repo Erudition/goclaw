@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -13,10 +14,11 @@ import (
 // SessionsMethods handles sessions.list, sessions.preview, sessions.patch, sessions.delete, sessions.reset.
 type SessionsMethods struct {
 	sessions store.SessionStore
+	eventBus bus.EventPublisher
 }
 
-func NewSessionsMethods(sess store.SessionStore) *SessionsMethods {
-	return &SessionsMethods{sessions: sess}
+func NewSessionsMethods(sess store.SessionStore, eventBus bus.EventPublisher) *SessionsMethods {
+	return &SessionsMethods{sessions: sess, eventBus: eventBus}
 }
 
 func (m *SessionsMethods) Register(router *gateway.MethodRouter) {
@@ -29,6 +31,7 @@ func (m *SessionsMethods) Register(router *gateway.MethodRouter) {
 
 type sessionsListParams struct {
 	AgentID string `json:"agentId"`
+	Channel string `json:"channel"` // optional: filter by channel prefix ("ws", "telegram")
 	Limit   int    `json:"limit"`
 	Offset  int    `json:"offset"`
 }
@@ -43,11 +46,19 @@ func (m *SessionsMethods) handleList(_ context.Context, client *gateway.Client, 
 		params.Limit = 20
 	}
 
-	result := m.sessions.ListPagedRich(store.SessionListOpts{
+	opts := store.SessionListOpts{
 		AgentID: params.AgentID,
+		Channel: params.Channel,
 		Limit:   params.Limit,
 		Offset:  params.Offset,
-	})
+	}
+	// Only filter by UserID when a channel filter is specified (e.g. chat sidebar sends channel="ws").
+	// Sessions admin page omits channel → sees all sessions unfiltered.
+	if params.Channel != "" {
+		opts.UserID = client.UserID()
+	}
+
+	result := m.sessions.ListPagedRich(opts)
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"sessions": result.Sessions,
 		"total":    result.Total,
@@ -120,6 +131,7 @@ func (m *SessionsMethods) handlePatch(ctx context.Context, client *gateway.Clien
 		"ok":  true,
 		"key": params.Key,
 	}))
+	emitAudit(m.eventBus, client, "session.patched", "session", params.Key)
 }
 
 func (m *SessionsMethods) handleDelete(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
@@ -138,6 +150,7 @@ func (m *SessionsMethods) handleDelete(ctx context.Context, client *gateway.Clie
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"ok": true,
 	}))
+	emitAudit(m.eventBus, client, "session.deleted", "session", params.Key)
 }
 
 func (m *SessionsMethods) handleReset(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
@@ -153,4 +166,5 @@ func (m *SessionsMethods) handleReset(ctx context.Context, client *gateway.Clien
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"ok": true,
 	}))
+	emitAudit(m.eventBus, client, "session.reset", "session", params.Key)
 }

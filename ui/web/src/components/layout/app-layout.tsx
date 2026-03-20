@@ -1,20 +1,33 @@
-import { Outlet } from "react-router";
+import { Outlet, useLocation } from "react-router";
 import { WifiOff } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Sidebar } from "./sidebar";
 import { Topbar } from "./topbar";
+import { ErrorBoundary } from "@/components/shared/error-boundary";
 import { useUiStore } from "@/stores/use-ui-store";
 import { useAuthStore } from "@/stores/use-auth-store";
-import { useIsMobile } from "@/hooks/use-media-query";
+import { useIsTablet } from "@/hooks/use-media-query";
 import { cn } from "@/lib/utils";
+
+/**
+ * Returns a stable key for pages that handle their own sub-navigation
+ * (e.g. /chat/:sessionKey, /sessions/:key). Prevents ErrorBoundary from
+ * remounting the entire page when only the dynamic param changes.
+ */
+function stableErrorBoundaryKey(pathname: string): string {
+  // Strip dynamic segments: /chat/anything → /chat
+  const base = pathname.replace(/^(\/[^/]+)\/.*$/, "$1");
+  return base;
+}
 
 export function AppLayout() {
   const { t } = useTranslation("common");
+  const location = useLocation();
   const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
   const mobileSidebarOpen = useUiStore((s) => s.mobileSidebarOpen);
   const setMobileSidebarOpen = useUiStore((s) => s.setMobileSidebarOpen);
   const connected = useAuthStore((s) => s.connected);
-  const isMobile = useIsMobile();
+  const isMobile = useIsTablet();
 
   return (
     <div className="flex h-dvh overflow-hidden safe-top">
@@ -49,7 +62,9 @@ export function AppLayout() {
           </div>
         )}
         <main className="flex-1 overflow-y-auto">
-          <Outlet />
+          <ErrorBoundary key={stableErrorBoundaryKey(location.pathname)}>
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
     </div>

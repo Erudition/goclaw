@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import type { ChannelInstanceData } from "@/types/channel";
 import { configSchema } from "../channel-schemas";
 import { ChannelFields } from "../channel-fields";
+import { ChannelScopesInfo } from "../channel-scopes-info";
 
 interface ChannelConfigTabProps {
   instance: ChannelInstanceData;
@@ -77,13 +78,15 @@ export function ChannelConfigTab({ instance, onUpdate }: ChannelConfigTabProps) 
   }, [webhookPath]);
 
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="space-y-6">
       <ChannelFields
         fields={fields}
         values={values}
         onChange={handleChange}
         idPrefix="cd-cfg"
       />
+
+      <ChannelScopesInfo channelType={instance.channel_type} />
 
       {showWebhookUrl && (
         <div className="flex items-start gap-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm dark:border-blue-800 dark:bg-blue-950">

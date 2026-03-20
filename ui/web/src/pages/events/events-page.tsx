@@ -11,11 +11,10 @@ import { Methods } from "@/api/protocol";
 import { EventCard } from "./event-sections";
 import type { TeamData } from "@/types/team";
 
-const EVENT_CATEGORY_VALUES = ["all", "delegation", "team.task", "team.message", "agent", "team.crud", "agent_link"] as const;
+const EVENT_CATEGORY_VALUES = ["all", "team.task", "team.message", "agent", "team.crud", "agent_link"] as const;
 
 const CATEGORY_KEY_MAP: Record<string, string> = {
   "all": "categories.all",
-  "delegation": "categories.delegation",
   "team.task": "categories.task",
   "team.message": "categories.message",
   "agent": "categories.agent",
@@ -201,7 +200,7 @@ export function EventsPage() {
           <select
             value={teamFilter}
             onChange={(e) => setTeamFilter(e.target.value)}
-            className="h-7 rounded-md border bg-background px-2 text-xs"
+            className="h-7 rounded-md border bg-background px-2 text-base md:text-xs"
           >
             <option value="all">{t("filters.allTeams")}</option>
             {uniqueTeams.map((id) => (
@@ -216,7 +215,7 @@ export function EventsPage() {
         <select
           value={userFilter}
           onChange={(e) => setUserFilter(e.target.value)}
-          className="h-7 rounded-md border bg-background px-2 text-xs"
+          className="h-7 rounded-md border bg-background px-2 text-base md:text-xs"
         >
           <option value="all">{t("filters.allUsers")}</option>
           {uniqueUsers.map((uid) => (
@@ -230,7 +229,7 @@ export function EventsPage() {
         <select
           value={chatFilter}
           onChange={(e) => setChatFilter(e.target.value)}
-          className="h-7 rounded-md border bg-background px-2 text-xs"
+          className="h-7 rounded-md border bg-background px-2 text-base md:text-xs"
         >
           <option value="all">{t("filters.allChats")}</option>
           {uniqueChats.map((cid) => (

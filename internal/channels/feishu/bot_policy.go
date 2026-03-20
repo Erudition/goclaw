@@ -84,11 +84,18 @@ func (c *Channel) checkGroupPolicy(senderID, chatID string) bool {
 			return true
 		}
 		groupSenderID := fmt.Sprintf("group:%s", chatID)
-		if c.pairingService != nil && c.pairingService.IsPaired(groupSenderID, c.Name()) {
-			c.approvedGroups.Store(chatID, true)
-			return true
+		if c.pairingService != nil {
+			paired, err := c.pairingService.IsPaired(groupSenderID, c.Name())
+			if err != nil {
+				slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
+					"group_sender", groupSenderID, "channel", c.Name(), "error", err)
+				paired = true
+			}
+			if paired {
+				c.approvedGroups.Store(chatID, true)
+				return true
+			}
 		}
-
 		c.sendPairingReply(groupSenderID, chatID)
 		return false
 	default: // "open"
@@ -117,7 +124,14 @@ func (c *Channel) checkDMPolicy(senderID, chatID string) bool {
 	default: // "pairing"
 		paired := false
 		if c.pairingService != nil {
-			paired = c.pairingService.IsPaired(senderID, c.Name())
+			p, err := c.pairingService.IsPaired(senderID, c.Name())
+			if err != nil {
+				slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
+					"sender_id", senderID, "channel", c.Name(), "error", err)
+				paired = true
+			} else {
+				paired = p
+			}
 		}
 		inAllowList := c.HasAllowList() && c.IsAllowed(senderID)
 
@@ -137,7 +151,7 @@ func (c *Channel) sendPairingReply(senderID, chatID string) {
 
 	// Debounce
 	if lastSent, ok := c.pairingDebounce.Load(senderID); ok {
-		if time.Since(lastSent.(time.Time)) < pairingDebounceTime {
+		if t, ok := lastSent.(time.Time); ok && time.Since(t) < pairingDebounceTime {
 			return
 		}
 	}

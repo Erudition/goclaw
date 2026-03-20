@@ -35,19 +35,7 @@ func (h *TracesHandler) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (h *TracesHandler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if h.token != "" {
-			if extractBearerToken(r) != h.token {
-				locale := extractLocale(r)
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": i18n.T(locale, i18n.MsgUnauthorized)})
-				return
-			}
-		}
-		locale := extractLocale(r)
-		ctx := store.WithLocale(r.Context(), locale)
-		r = r.WithContext(ctx)
-		next(w, r)
-	}
+	return requireAuth(h.token, "", next)
 }
 
 func (h *TracesHandler) handleList(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +59,9 @@ func (h *TracesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	if v := r.URL.Query().Get("status"); v != "" {
 		opts.Status = v
 	}
+	if v := r.URL.Query().Get("channel"); v != "" {
+		opts.Channel = v
+	}
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
 			opts.Limit = n
@@ -90,7 +81,7 @@ func (h *TracesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 
 	total, _ := h.tracing.CountTraces(r.Context(), opts)
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"traces": traces,
 		"total":  total,
 		"limit":  opts.Limit,
@@ -119,7 +110,7 @@ func (h *TracesHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"trace": trace,
 		"spans": spans,
 	})
@@ -176,7 +167,7 @@ func (h *TracesHandler) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payload := struct {
-		ExportedAt time.Time        `json:"exported_at"`
+		ExportedAt time.Time `json:"exported_at"`
 		traceExportEntry
 	}{
 		ExportedAt:       time.Now().UTC(),

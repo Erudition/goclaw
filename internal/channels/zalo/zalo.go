@@ -187,6 +187,10 @@ func (c *Channel) processUpdate(update zaloUpdate) {
 
 func (c *Channel) handleTextMessage(msg *zaloMessage) {
 	senderID := msg.From.ID
+	if senderID == "" {
+		slog.Warn("zalo: dropping text message with empty sender ID", "message_id", msg.MessageID)
+		return
+	}
 	chatID := msg.Chat.ID
 	if chatID == "" {
 		chatID = senderID
@@ -218,6 +222,10 @@ func (c *Channel) handleTextMessage(msg *zaloMessage) {
 
 func (c *Channel) handleImageMessage(msg *zaloMessage) {
 	senderID := msg.From.ID
+	if senderID == "" {
+		slog.Warn("zalo: dropping image message with empty sender ID", "message_id", msg.MessageID)
+		return
+	}
 	chatID := msg.Chat.ID
 	if chatID == "" {
 		chatID = senderID
@@ -290,7 +298,14 @@ func (c *Channel) checkDMPolicy(senderID, chatID string) bool {
 		// Check if already paired or in allowlist
 		paired := false
 		if c.pairingService != nil {
-			paired = c.pairingService.IsPaired(senderID, c.Name())
+			p, err := c.pairingService.IsPaired(senderID, c.Name())
+			if err != nil {
+				slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
+					"sender_id", senderID, "channel", c.Name(), "error", err)
+				paired = true
+			} else {
+				paired = p
+			}
 		}
 		inAllowList := c.HasAllowList() && c.IsAllowed(senderID)
 

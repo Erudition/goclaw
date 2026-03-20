@@ -25,7 +25,7 @@ import { slugify, isValidSlug } from "@/lib/slug";
 import { useProviders } from "@/pages/providers/hooks/use-providers";
 import { useProviderModels } from "@/pages/providers/hooks/use-provider-models";
 import { useProviderVerify } from "@/pages/providers/hooks/use-provider-verify";
-import { AGENT_PRESETS } from "./agent-presets";
+import { useAgentPresets } from "./agent-presets";
 
 interface AgentCreateDialogProps {
   open: boolean;
@@ -35,13 +35,15 @@ interface AgentCreateDialogProps {
 
 export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateDialogProps) {
   const { t } = useTranslation("agents");
+  const agentPresets = useAgentPresets();
   const { providers } = useProviders();
+  const [emoji, setEmoji] = useState("");
   const [agentKey, setAgentKey] = useState("");
   const [keyTouched, setKeyTouched] = useState(false);
   const [displayName, setDisplayName] = useState("");
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
-  const [agentType, setAgentType] = useState<"open" | "predefined">("open");
+  const [agentType, setAgentType] = useState<"open" | "predefined">("predefined");
   const [description, setDescription] = useState("");
   const [selfEvolve, setSelfEvolve] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -80,6 +82,7 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
     setError("");
     try {
       const otherConfig: Record<string, unknown> = {};
+      if (emoji.trim()) otherConfig.emoji = emoji.trim();
       if (description.trim()) otherConfig.description = description.trim();
       if (selfEvolve) otherConfig.self_evolve = true;
       await onCreate({
@@ -91,6 +94,7 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
         other_config: Object.keys(otherConfig).length > 0 ? otherConfig : undefined,
       });
       onOpenChange(false);
+      setEmoji("");
       setAgentKey("");
       setKeyTouched(false);
       setDisplayName("");
@@ -118,21 +122,32 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
         <DialogHeader>
           <DialogTitle>{t("create.title")}</DialogTitle>
         </DialogHeader>
-        <div className="space-y-4 py-4 px-0.5 -mx-0.5 overflow-y-auto min-h-0">
+        <div className="space-y-4 py-4 -mx-4 px-4 sm:-mx-6 sm:px-6 overflow-y-auto min-h-0">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="displayName">{t("create.displayName")}</Label>
-              <Input
-                id="displayName"
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                onBlur={() => {
-                  if (!keyTouched && displayName.trim()) {
-                    setAgentKey(slugify(displayName.trim()));
-                  }
-                }}
-                placeholder={t("create.displayNamePlaceholder")}
-              />
+              <div className="flex gap-2">
+                <Input
+                  id="emoji"
+                  value={emoji}
+                  onChange={(e) => setEmoji(e.target.value)}
+                  placeholder="🤖"
+                  className="w-14 shrink-0 text-center text-lg"
+                  maxLength={2}
+                  title={t("create.emojiHint")}
+                />
+                <Input
+                  id="displayName"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  onBlur={() => {
+                    if (!keyTouched && displayName.trim()) {
+                      setAgentKey(slugify(displayName.trim()));
+                    }
+                  }}
+                  placeholder={t("create.displayNamePlaceholder")}
+                />
+              </div>
             </div>
             <div className="space-y-2">
               <Label htmlFor="agentKey">{t("create.agentKey")}</Label>
@@ -210,18 +225,6 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
             <div className="flex gap-2">
               <button
                 type="button"
-                onClick={() => setAgentType("open")}
-                className={`flex-1 rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
-                  agentType === "open"
-                    ? "border-primary bg-primary text-primary-foreground"
-                    : "border-input bg-background hover:bg-accent"
-                }`}
-              >
-                {t("create.open")}
-                <span className="block text-xs font-normal opacity-70">{t("create.openSubLabel")}</span>
-              </button>
-              <button
-                type="button"
                 onClick={() => setAgentType("predefined")}
                 className={`flex-1 rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
                   agentType === "predefined"
@@ -232,6 +235,18 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
                 {t("create.predefined")}
                 <span className="block text-xs font-normal opacity-70">{t("create.predefinedSubLabel")}</span>
               </button>
+              <button
+                type="button"
+                onClick={() => setAgentType("open")}
+                className={`flex-1 rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
+                  agentType === "open"
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-input bg-background hover:bg-accent"
+                }`}
+              >
+                {t("create.open")}
+                <span className="block text-xs font-normal opacity-70">{t("create.openSubLabel")}</span>
+              </button>
             </div>
           </div>
 
@@ -239,7 +254,7 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
             <div className="space-y-3">
               <Label>{t("create.describeAgent")}</Label>
               <div className="flex flex-wrap gap-1.5">
-                {AGENT_PRESETS.map((preset) => (
+                {agentPresets.map((preset) => (
                   <button
                     key={preset.label}
                     type="button"

@@ -18,7 +18,12 @@ interface StartResponse {
   status?: string;
 }
 
-export function OAuthSection({ onSuccess }: { onSuccess: () => void }) {
+interface OAuthSectionProps {
+  onSuccess: () => void;
+  authenticatedActionLabel?: string;
+}
+
+export function OAuthSection({ onSuccess, authenticatedActionLabel }: OAuthSectionProps) {
   const { t } = useTranslation("providers");
   const http = useHttp();
   const [status, setStatus] = useState<OAuthStatus | null>(null);
@@ -132,7 +137,7 @@ export function OAuthSection({ onSuccess }: { onSuccess: () => void }) {
       setStatus({ authenticated: false });
       toast.success(i18next.t("providers:oauth.loggedOut"), i18next.t("providers:oauth.loggedOutDesc"));
     } catch (err) {
-      toast.error("Logout failed", err instanceof Error ? err.message : "");
+      toast.error(i18next.t("providers:oauth.logoutFailed"), err instanceof Error ? err.message : "");
     }
   };
 
@@ -176,9 +181,16 @@ export function OAuthSection({ onSuccess }: { onSuccess: () => void }) {
           {t("oauth.modelPrefixHint")} <code className="rounded bg-muted px-1 font-mono">openai-codex/</code>{" "}
           {t("oauth.modelPrefixExample")}
         </p>
-        <Button variant="outline" size="sm" onClick={handleLogout} className="gap-1.5">
-          {t("oauth.removeToken")}
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          {authenticatedActionLabel && (
+            <Button size="sm" onClick={onSuccess}>
+              {authenticatedActionLabel}
+            </Button>
+          )}
+          <Button variant="outline" size="sm" onClick={handleLogout} className="gap-1.5">
+            {t("oauth.removeToken")}
+          </Button>
+        </div>
       </div>
     );
   }

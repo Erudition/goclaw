@@ -132,6 +132,7 @@ const (
 	MsgStatusPhaseCompact  = "status.phase_compact"   // "Phase: Compacting context..."
 	MsgStatusPhaseDefault  = "status.phase_default"   // "Phase: Processing..."
 	MsgCancelledReply      = "status.cancelled"       // "✋ Cancelled. What would you like to do next?"
+	MsgInjectedAck         = "status.injected_ack"    // "Got it, I'll incorporate that into what I'm working on."
 
 	// --- Knowledge Graph ---
 	MsgEntityIDRequired           = "error.entity_id_required"            // "entity_id is required"
@@ -169,9 +170,13 @@ const (
 	MsgToolSpawn             = "core.tool.spawn"
 	MsgToolSkillSearch       = "core.tool.skill_search"
 	MsgToolUseSkill          = "core.tool.use_skill"
-	MsgToolDelegateSearch    = "core.tool.delegate_search"
-	MsgToolEvaluateLoop      = "core.tool.evaluate_loop"
-	MsgToolHandoff           = "core.tool.handoff"
+	MsgToolSkillManage       = "core.tool.skill_manage"
+	MsgToolPublishSkill      = "core.tool.publish_skill"
 	MsgToolTeamTasks         = "core.tool.team_tasks"
 	MsgToolTeamMessage       = "core.tool.team_message"
+
+	// Skill evolution nudges (user-facing)
+	MsgSkillNudgePostscript = "skill.nudge_postscript"
+	MsgSkillNudge70Pct      = "skill.nudge_70_pct"
+	MsgSkillNudge90Pct      = "skill.nudge_90_pct"
 )

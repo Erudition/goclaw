@@ -81,15 +81,15 @@ func newDockerSandbox(ctx context.Context, name string, cfg Config, workspace st
 		args = append(args, "--network", "none")
 	}
 
-	// Workspace mount
+	// Workspace mount — resolve host path for DooD (Docker-out-of-Docker) setups.
 	containerWorkdir := cfg.ContainerWorkdir()
 	if workspace != "" && cfg.WorkspaceAccess != AccessNone {
 		mountOpt := "rw"
 		if cfg.WorkspaceAccess == AccessRO {
 			mountOpt = "ro"
 		}
-		hostAccessPath := resolveHostWorkspacePath(ctx, workspace)
-		args = append(args, "-v", fmt.Sprintf("%s:%s:%s", hostAccessPath, containerWorkdir, mountOpt))
+		hostPath := resolveHostWorkspacePath(ctx, workspace)
+		args = append(args, "-v", fmt.Sprintf("%s:%s:%s", hostPath, containerWorkdir, mountOpt))
 	}
 	args = append(args, "-w", containerWorkdir)
 
@@ -140,7 +140,8 @@ func newDockerSandbox(ctx context.Context, name string, cfg Config, workspace st
 }
 
 // Exec runs a command inside the container.
-func (s *DockerSandbox) Exec(ctx context.Context, command []string, workDir string) (*ExecResult, error) {
+// Optional ExecOption (e.g. WithEnv) injects per-call env vars via docker exec -e.
+func (s *DockerSandbox) Exec(ctx context.Context, command []string, workDir string, opts ...ExecOption) (*ExecResult, error) {
 	s.mu.Lock()
 	s.lastUsed = time.Now()
 	s.mu.Unlock()
@@ -153,7 +154,13 @@ func (s *DockerSandbox) Exec(ctx context.Context, command []string, workDir stri
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	o := ApplyExecOpts(opts)
+
 	args := []string{"exec"}
+	// Inject env vars as -e flags before containerID (credentialed exec)
+	for k, v := range o.Env {
+		args = append(args, "-e", k+"="+v)
+	}
 	if workDir != "" {
 		args = append(args, "-w", workDir)
 	}
@@ -241,20 +248,8 @@ func (m *DockerManager) Get(ctx context.Context, key string, workspace string, c
 		return nil, ErrSandboxDisabled
 	}
 
-	// Apply per-request network override from context.
-	if netOverride, ok := NetworkOverrideFromCtx(ctx); ok {
-		cfg.NetworkEnabled = netOverride
-	}
-
-	// Include network mode in the cache key so that agents with
-	// networking enabled get a different container from those without.
-	effectiveKey := key
-	if cfg.NetworkEnabled {
-		effectiveKey = key + "-net"
-	}
-
 	m.mu.RLock()
-	if sb, ok := m.sandboxes[effectiveKey]; ok {
+	if sb, ok := m.sandboxes[key]; ok {
 		m.mu.RUnlock()
 		return sb, nil
 	}
@@ -264,7 +259,7 @@ func (m *DockerManager) Get(ctx context.Context, key string, workspace string, c
 	defer m.mu.Unlock()
 
 	// Double-check
-	if sb, ok := m.sandboxes[effectiveKey]; ok {
+	if sb, ok := m.sandboxes[key]; ok {
 		return sb, nil
 	}
 
@@ -272,13 +267,13 @@ func (m *DockerManager) Get(ctx context.Context, key string, workspace string, c
 	if prefix == "" {
 		prefix = "goclaw-sbx-"
 	}
-	name := prefix + sanitizeKey(effectiveKey)
+	name := prefix + sanitizeKey(key)
 	sb, err := newDockerSandbox(ctx, name, cfg, workspace)
 	if err != nil {
 		return nil, err
 	}
 
-	m.sandboxes[effectiveKey] = sb
+	m.sandboxes[key] = sb
 	return sb, nil
 }
 

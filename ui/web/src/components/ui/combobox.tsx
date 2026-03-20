@@ -16,6 +16,10 @@ interface ComboboxProps {
   className?: string;
   /** Render dropdown into a portal container (useful inside dialogs with overflow clipping). */
   portalContainer?: React.RefObject<HTMLElement | null>;
+  /** Allow typing custom values not in the options list. Shows a hint in the dropdown. */
+  allowCustom?: boolean;
+  /** Label for the custom value hint (default: "Use custom:"). */
+  customLabel?: string;
 }
 
 export function Combobox({
@@ -25,9 +29,15 @@ export function Combobox({
   placeholder,
   className,
   portalContainer,
+  allowCustom,
+  customLabel = "Use custom:",
 }: ComboboxProps) {
   const [open, setOpen] = React.useState(false);
   const [search, setSearch] = React.useState("");
+  // Track whether user actively typed since last focus — when false, show all options
+  const inputDirtyRef = React.useRef(false);
+  const [inputDirty, setInputDirty] = React.useState(false);
+  const inputRef = React.useRef<HTMLInputElement>(null);
   const containerRef = React.useRef<HTMLDivElement>(null);
   const dropdownRef = React.useRef<HTMLDivElement>(null);
   const [dropdownStyle, setDropdownStyle] = React.useState<React.CSSProperties>({});
@@ -48,23 +58,36 @@ export function Combobox({
         (!dropdownRef.current || !dropdownRef.current.contains(target))
       ) {
         setOpen(false);
+        setInputDirty(false);
+        inputDirtyRef.current = false;
       }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
+  // Resolve the actual portal target: explicit prop > closest dialog content > document.body
+  const resolvedPortal = React.useMemo(() => {
+    if (portalContainer?.current) return portalContainer.current;
+    // Auto-detect if inside a Radix Dialog (which sets pointer-events:none on body)
+    const el = containerRef.current?.closest<HTMLElement>('[data-slot="dialog-content"]');
+    return el ?? null;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [portalContainer, open]);
+
   // Compute dropdown position — always use fixed positioning for portal rendering
   React.useLayoutEffect(() => {
     if (!open || !containerRef.current) return;
     const inputRect = containerRef.current.getBoundingClientRect();
-    if (portalContainer?.current) {
-      const portalRect = portalContainer.current.getBoundingClientRect();
-      const left = inputRect.left - portalRect.left;
-      const maxWidth = portalRect.width - left;
+    if (resolvedPortal) {
+      const portalRect = resolvedPortal.getBoundingClientRect();
+      const scrollTop = resolvedPortal.scrollTop || 0;
+      const scrollLeft = resolvedPortal.scrollLeft || 0;
+      const left = inputRect.left - portalRect.left + scrollLeft;
+      const maxWidth = portalRect.width - (inputRect.left - portalRect.left);
       setDropdownStyle({
         position: "absolute",
-        top: inputRect.bottom - portalRect.top + 4,
+        top: inputRect.bottom - portalRect.top + scrollTop + 4,
         left,
         width: inputRect.width,
         maxWidth,
@@ -79,15 +102,24 @@ export function Combobox({
         zIndex: 9999,
       });
     }
-  }, [open, search, portalContainer]);
+  }, [open, search, resolvedPortal]);
 
+  // When not dirty (just focused), show all options. When dirty, filter by search.
   const filtered = React.useMemo(() => {
-    if (!search) return options;
+    if (!inputDirty || !search) return options;
     const q = search.toLowerCase();
     return options.filter(
       (o) =>
         o.value.toLowerCase().includes(q) ||
         (o.label && o.label.toLowerCase().includes(q)),
+    );
+  }, [options, search, inputDirty]);
+
+  // Check if typed value is a custom value (not matching any option exactly)
+  const isCustomValue = React.useMemo(() => {
+    if (!search.trim()) return false;
+    return !options.some(
+      (o) => o.value === search || o.label === search,
     );
   }, [options, search]);
 
@@ -96,20 +128,37 @@ export function Combobox({
     const match = options.find((o) => o.value === val);
     setSearch(match?.label || val);
     setOpen(false);
+    setInputDirty(false);
+    inputDirtyRef.current = false;
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setSearch(val);
     onChange(val);
+    if (!inputDirtyRef.current) {
+      inputDirtyRef.current = true;
+      setInputDirty(true);
+    }
     if (!open && options.length > 0) setOpen(true);
   };
 
-  const dropdownContent = open && filtered.length > 0 && (
+  const handleFocus = () => {
+    // Reset dirty state on focus — shows all options initially
+    inputDirtyRef.current = false;
+    setInputDirty(false);
+    if (options.length > 0) setOpen(true);
+    // Select all text so user can start typing to replace
+    requestAnimationFrame(() => inputRef.current?.select());
+  };
+
+  const showCustomHint = allowCustom && inputDirty && isCustomValue && search.trim();
+
+  const dropdownContent = open && (filtered.length > 0 || showCustomHint) && (
     <div
       ref={dropdownRef}
       style={dropdownStyle}
-      className="bg-popover text-popover-foreground max-h-60 overflow-y-auto rounded-md border p-1 shadow-md"
+      className="bg-popover text-popover-foreground pointer-events-auto max-h-60 overflow-y-auto rounded-md border p-1 shadow-md"
     >
       {filtered.map((o) => (
         <button
@@ -125,18 +174,29 @@ export function Combobox({
           )}
         </button>
       ))}
+      {showCustomHint && (
+        <button
+          type="button"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => handleSelect(search.trim())}
+          className="hover:bg-accent hover:text-accent-foreground text-muted-foreground flex w-full cursor-pointer items-center rounded-sm py-1.5 pl-2 text-sm italic outline-hidden select-none"
+        >
+          {customLabel} <span className="text-foreground ml-1 font-medium not-italic">{search.trim()}</span>
+        </button>
+      )}
     </div>
   );
 
   return (
     <div ref={containerRef} className={cn("relative", className)}>
       <input
+        ref={inputRef}
         value={search}
         onChange={handleInputChange}
-        onFocus={() => options.length > 0 && setOpen(true)}
+        onFocus={handleFocus}
         placeholder={placeholder}
         className={cn(
-          "border-input placeholder:text-muted-foreground dark:bg-input/30 h-9 w-full rounded-md border bg-transparent px-3 py-1 pr-8 text-sm shadow-xs outline-none transition-[color,box-shadow]",
+          "border-input placeholder:text-muted-foreground dark:bg-input/30 h-9 w-full rounded-md border bg-transparent px-3 py-1 pr-8 text-base md:text-sm shadow-xs outline-none transition-[color,box-shadow]",
           "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]",
         )}
       />
@@ -148,7 +208,7 @@ export function Combobox({
       )}
       {dropdownContent && createPortal(
         dropdownContent,
-        portalContainer?.current ?? document.body,
+        resolvedPortal ?? document.body,
       )}
     </div>
   );

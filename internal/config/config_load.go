@@ -16,17 +16,18 @@ import (
 // Default returns a Config with sensible defaults.
 func Default() *Config {
 	return &Config{
+		DataDir: "~/.goclaw/data",
 		Agents: AgentsConfig{
 			Defaults: AgentDefaults{
 				Workspace:           "~/.goclaw/workspace",
 				RestrictToWorkspace: true,
 				Provider:            "anthropic",
 				Model:               "claude-sonnet-4-5-20250929",
-				MaxTokens:           8192,
-				Temperature:         0.7,
-				MaxToolIterations:   20,
+				MaxTokens:           DefaultMaxTokens,
+				Temperature:         DefaultTemperature,
+				MaxToolIterations:   DefaultMaxIterations,
 				MaxToolCalls:        25,
-				ContextWindow:       200000,
+				ContextWindow:       DefaultContextWindow,
 				Subagents: &SubagentsConfig{
 					MaxConcurrent: 20,
 					MaxSpawnDepth: 1,
@@ -41,7 +42,7 @@ func Default() *Config {
 		Gateway: GatewayConfig{
 			Host:            "0.0.0.0",
 			Port:            18790,
-			MaxMessageChars: 32000,
+			MaxMessageChars: DefaultMaxMessageChars,
 			RateLimitRPM:    20,
 		},
 		Tools: ToolsConfig{
@@ -58,9 +59,7 @@ func Default() *Config {
 			},
 			RateLimitPerHour: 150,
 		},
-		Sessions: SessionsConfig{
-			Storage: "~/.goclaw/sessions",
-		},
+		Sessions: SessionsConfig{},
 	}
 }
 
@@ -172,9 +171,9 @@ func (c *Config) applyEnvOverrides() {
 	envFallback("GOCLAW_PROVIDER", &c.Agents.Defaults.Provider)
 	envFallback("GOCLAW_MODEL", &c.Agents.Defaults.Model)
 
-	// Workspace & sessions
+	// Data directory, workspace & sessions
+	envStr("GOCLAW_DATA_DIR", &c.DataDir)
 	envStr("GOCLAW_WORKSPACE", &c.Agents.Defaults.Workspace)
-	envStr("GOCLAW_SESSIONS_STORAGE", &c.Sessions.Storage)
 
 	// Gateway host/port
 	envStr("GOCLAW_HOST", &c.Gateway.Host)
@@ -319,6 +318,22 @@ func (c *Config) Hash() string {
 	data, _ := json.Marshal(c)
 	h := sha256.Sum256(data)
 	return fmt.Sprintf("%x", h[:8])
+}
+
+// ResolvedDataDir returns the expanded data directory path.
+func (c *Config) ResolvedDataDir() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return ExpandHome(c.DataDir)
+}
+
+// ResolvedDataDirFromEnv returns the data dir from GOCLAW_DATA_DIR env or default.
+// Use this in packages that don't have access to a Config instance.
+func ResolvedDataDirFromEnv() string {
+	if v := os.Getenv("GOCLAW_DATA_DIR"); v != "" {
+		return ExpandHome(v)
+	}
+	return ExpandHome("~/.goclaw/data")
 }
 
 // WorkspacePath returns the expanded workspace path.

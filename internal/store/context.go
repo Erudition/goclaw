@@ -23,7 +23,22 @@ const (
 	SelfEvolveKey contextKey = "goclaw_self_evolve"
 	// LocaleKey is the context key for the user's preferred locale (e.g. "en", "vi", "zh").
 	LocaleKey contextKey = "goclaw_locale"
+	// SharedMemoryKey indicates memory should be shared (no per-user scoping).
+	SharedMemoryKey contextKey = "goclaw_shared_memory"
+	// ShellDenyGroupsKey holds per-agent shell deny group overrides.
+	ShellDenyGroupsKey contextKey = "goclaw_shell_deny_groups"
 )
+
+// WithShellDenyGroups returns a new context with shell deny group overrides.
+func WithShellDenyGroups(ctx context.Context, groups map[string]bool) context.Context {
+	return context.WithValue(ctx, ShellDenyGroupsKey, groups)
+}
+
+// ShellDenyGroupsFromContext returns shell deny group overrides from the context, or nil.
+func ShellDenyGroupsFromContext(ctx context.Context) map[string]bool {
+	v, _ := ctx.Value(ShellDenyGroupsKey).(map[string]bool)
+	return v
+}
 
 // WithUserID returns a new context with the given user ID.
 func WithUserID(ctx context.Context, id string) context.Context {
@@ -88,6 +103,26 @@ func SelfEvolveFromContext(ctx context.Context) bool {
 		return v
 	}
 	return false
+}
+
+// WithSharedMemory returns a context flagged for shared memory (skip per-user scoping).
+func WithSharedMemory(ctx context.Context) context.Context {
+	return context.WithValue(ctx, SharedMemoryKey, true)
+}
+
+// IsSharedMemory returns true if memory should be shared across users.
+func IsSharedMemory(ctx context.Context) bool {
+	v, _ := ctx.Value(SharedMemoryKey).(bool)
+	return v
+}
+
+// MemoryUserID returns the userID to use for memory operations.
+// Returns "" (shared/global) when shared memory is active, otherwise the per-user ID.
+func MemoryUserID(ctx context.Context) string {
+	if IsSharedMemory(ctx) {
+		return ""
+	}
+	return UserIDFromContext(ctx)
 }
 
 // WithLocale returns a new context with the given locale.

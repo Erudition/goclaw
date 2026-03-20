@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/oauth"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
@@ -22,18 +23,20 @@ type OAuthHandler struct {
 	provStore   store.ProviderStore
 	secretStore store.ConfigSecretsStore
 	providerReg *providers.Registry
+	msgBus      *bus.MessageBus
 
 	mu      sync.Mutex
 	pending *oauth.PendingLogin // active OAuth flow (if any)
 }
 
 // NewOAuthHandler creates a handler for OAuth endpoints.
-func NewOAuthHandler(token string, provStore store.ProviderStore, secretStore store.ConfigSecretsStore, providerReg *providers.Registry) *OAuthHandler {
+func NewOAuthHandler(token string, provStore store.ProviderStore, secretStore store.ConfigSecretsStore, providerReg *providers.Registry, msgBus *bus.MessageBus) *OAuthHandler {
 	return &OAuthHandler{
 		token:       token,
 		provStore:   provStore,
 		secretStore: secretStore,
 		providerReg: providerReg,
+		msgBus:      msgBus,
 	}
 }
 
@@ -46,14 +49,7 @@ func (h *OAuthHandler) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (h *OAuthHandler) auth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !tokenMatch(extractBearerToken(r), h.token) {
-			locale := extractLocale(r)
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": i18n.T(locale, i18n.MsgUnauthorized)})
-			return
-		}
-		next(w, r)
-	}
+	return requireAuth(h.token, "", next)
 }
 
 func (h *OAuthHandler) newTokenSource() *oauth.DBTokenSource {
@@ -115,6 +111,7 @@ func (h *OAuthHandler) handleStart(w http.ResponseWriter, r *http.Request) {
 	// Wait for callback in background, save token when done
 	go h.waitForCallback(pending)
 
+	emitAudit(h.msgBus, r, "oauth.login_started", "oauth", "openai")
 	writeJSON(w, http.StatusOK, map[string]any{"auth_url": pending.AuthURL})
 }
 
@@ -204,6 +201,7 @@ func (h *OAuthHandler) handleLogout(w http.ResponseWriter, r *http.Request) {
 		h.providerReg.Unregister(oauth.DefaultProviderName)
 	}
 
+	emitAudit(h.msgBus, r, "oauth.logout", "oauth", "openai")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "logged out"})
 }
 

@@ -17,6 +17,10 @@ import (
 // makeCronJobHandler creates a cron job handler that routes through the scheduler's cron lane.
 // This ensures per-session concurrency control (same job can't run concurrently)
 // and integration with /stop, /stopall commands.
+// cronHeartbeatWakeFn holds the heartbeat wake function, set after ticker creation.
+// Safe because cron jobs only fire after Start(), well after this is set.
+var cronHeartbeatWakeFn func(agentID string)
+
 func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg *config.Config, channelMgr *channels.Manager) func(job *store.CronJob) (*store.CronJobResult, error) {
 	return func(job *store.CronJob) (*store.CronJobResult, error) {
 		agentID := job.AgentID
@@ -102,14 +106,19 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 			cronResult.OutputTokens = result.Usage.CompletionTokens
 		}
 
+		// wakeMode: trigger heartbeat after cron job completes
+		if job.Payload.WakeHeartbeat && cronHeartbeatWakeFn != nil {
+			cronHeartbeatWakeFn(agentID)
+		}
+
 		return cronResult, nil
 	}
 }
 
 // resolveCronPeerKind infers peer kind from the cron job's user ID.
-// Group cron jobs have userID prefixed with "group:" (set during job creation).
+// Group cron jobs have userID prefixed with "group:" or "guild:" (set during job creation).
 func resolveCronPeerKind(job *store.CronJob) string {
-	if strings.HasPrefix(job.UserID, "group:") {
+	if strings.HasPrefix(job.UserID, "group:") || strings.HasPrefix(job.UserID, "guild:") {
 		return "group"
 	}
 	return ""
