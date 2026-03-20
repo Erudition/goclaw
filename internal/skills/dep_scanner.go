@@ -32,40 +32,35 @@ func ScanSkillDeps(skillDir string) *SkillManifest {
 func scanScriptsDir(scriptsDir string) *SkillManifest {
 	m := &SkillManifest{ScriptsDir: scriptsDir}
 
-	entries, err := os.ReadDir(scriptsDir)
-	if err != nil {
-		return m
-	}
-
 	pyImports := make(map[string]bool)
 	nodeImports := make(map[string]bool)
 	binaries := make(map[string]bool)
-	// Track subdirectory names — these are local modules and must never be reported as missing.
+	// Track directory names and .py filenames — these are local modules and must never be reported as missing.
 	localModules := make(map[string]bool)
 
-	for _, e := range entries {
-		if e.IsDir() {
-			localModules[e.Name()] = true
-			// Recurse one level into subdirectories
-			subEntries, err := os.ReadDir(filepath.Join(scriptsDir, e.Name()))
-			if err != nil {
-				continue
-			}
-			for _, se := range subEntries {
-				if se.IsDir() {
-					continue
-				}
-				scanFile(filepath.Join(scriptsDir, e.Name(), se.Name()), pyImports, nodeImports, binaries)
-			}
-			continue
+	// Walk the scripts directory once to find all local modules (dirs and .py files)
+	_ = filepath.WalkDir(scriptsDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
 		}
-		// Track sibling .py files as local modules so cross-file imports
-		// (e.g. "from extract_form_field_info import ...") are not reported as pip deps.
-		if strings.HasSuffix(e.Name(), ".py") {
-			localModules[strings.TrimSuffix(e.Name(), ".py")] = true
+		if d.IsDir() {
+			if path != scriptsDir {
+				localModules[d.Name()] = true
+			}
+		} else if strings.HasSuffix(d.Name(), ".py") {
+			localModules[strings.TrimSuffix(d.Name(), ".py")] = true
 		}
-		scanFile(filepath.Join(scriptsDir, e.Name()), pyImports, nodeImports, binaries)
-	}
+		return nil
+	})
+
+	// Walk again to scan imports in all files
+	_ = filepath.WalkDir(scriptsDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		scanFile(path, pyImports, nodeImports, binaries)
+		return nil
+	})
 
 	for b := range binaries {
 		m.Requires = append(m.Requires, b)
