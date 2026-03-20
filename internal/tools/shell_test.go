@@ -53,10 +53,8 @@ func TestExecToolSecurityPolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tool := &ExecTool{
-				denyPatterns: defaultDenyPatterns,
-				timeout:      5 * time.Second,
-			}
+			tool := NewExecTool("", false)
+			tool.timeout = 5 * time.Second
 			ctx := context.Background()
 			if tt.sandboxKey != "" {
 				ctx = WithToolSandboxKey(ctx, tt.sandboxKey)

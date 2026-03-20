@@ -128,6 +128,9 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 	allPatterns = append(allPatterns, groupPatterns...)
 	allPatterns = append(allPatterns, t.pathDenyPatterns...)
 
+	// Sandbox routing (sandboxKey from ctx — thread-safe)
+	sandboxKey := ToolSandboxKeyFromCtx(ctx)
+
 	// Check for dangerous commands (applies to both host and sandbox).
 	for _, pattern := range allPatterns {
 		if pattern.MatchString(command) {
@@ -187,7 +190,6 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 				cwd = wd
 			}
 		}
-		sandboxKey := ToolSandboxKeyFromCtx(ctx)
 		return t.executeCredentialed(ctx, cred, binary, cmdArgs, cwd, sandboxKey)
 	}
 
@@ -225,7 +227,6 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 	}
 
 	// Sandbox routing (sandboxKey from ctx — thread-safe)
-	sandboxKey := ToolSandboxKeyFromCtx(ctx)
 	if t.sandboxMgr != nil && sandboxKey != "" {
 		return t.executeInSandbox(ctx, command, cwd, sandboxKey)
 	}
