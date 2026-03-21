@@ -85,16 +85,25 @@ func (s *PGMemoryStore) PutDocument(ctx context.Context, agentID, userID, path, 
 
 func (s *PGMemoryStore) DeleteDocument(ctx context.Context, agentID, userID, path string) error {
 	aid := mustParseUUID(agentID)
+	var res sql.Result
+	var err error
 	if userID == "" {
-		_, err := s.db.ExecContext(ctx,
+		res, err = s.db.ExecContext(ctx,
 			"DELETE FROM memory_documents WHERE agent_id = $1 AND path = $2 AND user_id IS NULL",
 			aid, path)
+	} else {
+		res, err = s.db.ExecContext(ctx,
+			"DELETE FROM memory_documents WHERE agent_id = $1 AND path = $2 AND user_id = $3",
+			aid, path, userID)
+	}
+	if err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx,
-		"DELETE FROM memory_documents WHERE agent_id = $1 AND path = $2 AND user_id = $3",
-		aid, path, userID)
-	return err
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("document not found: %s", path)
+	}
+	return nil
 }
 
 func (s *PGMemoryStore) ListDocuments(ctx context.Context, agentID, userID string) ([]store.DocumentInfo, error) {
@@ -169,18 +178,92 @@ func (s *PGMemoryStore) IndexDocument(ctx context.Context, agentID, userID, path
 		return nil
 	}
 
-	// Generate embeddings
+	// Generate embeddings with cache
 	var embeddings [][]float32
 	if s.provider != nil {
-		texts := make([]string, len(chunks))
+		providerName := s.provider.Name()
+		providerModel := s.provider.Model()
+
+		// Compute content hashes for all chunks
+		hashes := make([]string, len(chunks))
 		for i, c := range chunks {
-			texts[i] = c.Text
+			hashes[i] = memory.ContentHash(c.Text)
 		}
-		var embErr error
-		embeddings, embErr = s.provider.Embed(ctx, texts)
-		if embErr != nil {
-			slog.Warn("memory embedding failed, storing chunks without vectors",
-				"path", path, "chunks", len(chunks), "error", embErr)
+
+		// Batch lookup cached embeddings
+		cached, cacheErr := s.lookupEmbeddingCache(ctx, hashes, providerName, providerModel)
+		if cacheErr != nil {
+			slog.Warn("embedding cache lookup failed, falling back to full API call",
+				"path", path, "error", cacheErr)
+			cached = nil
+		}
+
+		// Determine which chunks need fresh embeddings
+		var uncachedIdxs []int
+		var uncachedTexts []string
+		for i, c := range chunks {
+			if cached != nil {
+				if _, ok := cached[hashes[i]]; ok {
+					continue
+				}
+			}
+			uncachedIdxs = append(uncachedIdxs, i)
+			uncachedTexts = append(uncachedTexts, c.Text)
+		}
+
+		if len(cached) > 0 {
+			slog.Debug("embedding cache hit",
+				"path", path, "cached", len(cached), "uncached", len(uncachedTexts))
+		}
+
+		// Call embedding API only for uncached texts
+		var freshEmbeddings [][]float32
+		if len(uncachedTexts) > 0 {
+			var embErr error
+			freshEmbeddings, embErr = s.provider.Embed(ctx, uncachedTexts)
+			if embErr != nil {
+				slog.Warn("memory embedding failed, storing chunks without vectors",
+					"path", path, "chunks", len(chunks), "error", embErr)
+			}
+		}
+
+		// Write fresh embeddings back to cache
+		if len(freshEmbeddings) > 0 {
+			if len(freshEmbeddings) != len(uncachedTexts) {
+				slog.Warn("embedding API returned mismatched count",
+					"expected", len(uncachedTexts), "got", len(freshEmbeddings))
+			}
+			var cacheEntries []embeddingCacheEntry
+			for j, emb := range freshEmbeddings {
+				if j < len(uncachedIdxs) {
+					cacheEntries = append(cacheEntries, embeddingCacheEntry{
+						Hash:      hashes[uncachedIdxs[j]],
+						Embedding: emb,
+					})
+				}
+			}
+			if writeErr := s.writeEmbeddingCache(ctx, cacheEntries, providerName, providerModel); writeErr != nil {
+				slog.Warn("embedding cache write failed", "path", path, "error", writeErr)
+			}
+		}
+
+		// Merge cached + fresh embeddings into final slice
+		if cached != nil || freshEmbeddings != nil {
+			embeddings = make([][]float32, len(chunks))
+			// Fill from cache
+			for i, h := range hashes {
+				if cached != nil {
+					if emb, ok := cached[h]; ok {
+						embeddings[i] = emb
+					}
+				}
+			}
+			// Fill from fresh
+			for j, idx := range uncachedIdxs {
+				if j < len(freshEmbeddings) {
+					embeddings[idx] = freshEmbeddings[j]
+				}
+			}
 		}
 	}
 
@@ -195,7 +278,7 @@ func (s *PGMemoryStore) IndexDocument(ctx context.Context, agentID, userID, path
 			uid = &userID
 		}
 
-		if embeddings != nil && i < len(embeddings) {
+		if embeddings != nil && i < len(embeddings) && embeddings[i] != nil {
 			// Insert with embedding via raw SQL (pgvector)
 			s.db.ExecContext(ctx,
 				`INSERT INTO memory_chunks (id, agent_id, document_id, user_id, path, start_line, end_line, hash, text, embedding, updated_at)

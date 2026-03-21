@@ -116,5 +116,10 @@
   "failedToLoadImage": "Failed to load image",
   "deleteFolder": "Delete folder",
   "deleteFile": "Delete file",
-  "loadMore": "Load more..."
+  "loadMore": "Load more...",
+  "viewCard": "Card view",
+  "viewList": "List view",
+  "errors": {
+    "serverError": "Something went wrong. Please try again later."
+  }
 }

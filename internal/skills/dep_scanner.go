@@ -37,6 +37,8 @@ func scanScriptsDir(scriptsDir string) *SkillManifest {
 	binaries := make(map[string]bool)
 	// Track directory names and .py filenames — these are local modules and must never be reported as missing.
 	localModules := make(map[string]bool)
+	// The scripts directory itself can be referenced as a module (e.g. "from scripts import utils").
+	localModules[filepath.Base(scriptsDir)] = true
 
 	// Walk the scripts directory once to find all local modules (dirs and .py files)
 	_ = filepath.WalkDir(scriptsDir, func(path string, d os.DirEntry, err error) error {

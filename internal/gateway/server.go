@@ -48,6 +48,7 @@ type Server struct {
 	providersHandler        *httpapi.ProvidersHandler        // provider CRUD API
 	delegationsHandler      *httpapi.DelegationsHandler      // delegation history API
 	teamEventsHandler       *httpapi.TeamEventsHandler       // team event history API
+	teamAttachmentsHandler  *httpapi.TeamAttachmentsHandler  // team attachment download API
 	builtinToolsHandler     *httpapi.BuiltinToolsHandler     // builtin tool management API
 	pendingMessagesHandler  *httpapi.PendingMessagesHandler  // pending messages API
 	secureCLIHandler       *httpapi.SecureCLIHandler        // secure CLI credential CRUD API
@@ -76,10 +77,16 @@ type Server struct {
 	version   string
 	db        interface{ PingContext(context.Context) error } // for health check DB ping
 
-	logTee *LogTee // optional; auto-unsubscribes clients on disconnect
+	logTee   *LogTee                  // optional; auto-unsubscribes clients on disconnect
+	postTurn tools.PostTurnProcessor // optional; for team task dispatch in HTTP API paths
 
 	httpServer *http.Server
 	mux        *http.ServeMux
+}
+
+// SetPostTurnProcessor sets the post-turn processor for team task dispatch in HTTP API handlers.
+func (s *Server) SetPostTurnProcessor(pt tools.PostTurnProcessor) {
+	s.postTurn = pt
 }
 
 // NewServer creates a new gateway server.
@@ -158,10 +165,16 @@ func (s *Server) BuildMux() *http.ServeMux {
 	if s.rateLimiter.Enabled() {
 		chatHandler.SetRateLimiter(s.rateLimiter.Allow)
 	}
+	if s.postTurn != nil {
+		chatHandler.SetPostTurnProcessor(s.postTurn)
+	}
 	mux.Handle("/v1/chat/completions", chatHandler)
 
 	// OpenResponses protocol
 	responsesHandler := httpapi.NewResponsesHandler(s.agents, s.sessions, s.cfg.Gateway.Token)
+	if s.postTurn != nil {
+		responsesHandler.SetPostTurnProcessor(s.postTurn)
+	}
 	mux.Handle("/v1/responses", responsesHandler)
 
 	// Direct tool invocation
@@ -223,6 +236,11 @@ func (s *Server) BuildMux() *http.ServeMux {
 	// Team event history API
 	if s.teamEventsHandler != nil {
 		s.teamEventsHandler.RegisterRoutes(mux)
+	}
+
+	// Team attachment download API
+	if s.teamAttachmentsHandler != nil {
+		s.teamAttachmentsHandler.RegisterRoutes(mux)
 	}
 
 	// Builtin tool management API
@@ -486,6 +504,11 @@ func (s *Server) SetDelegationsHandler(h *httpapi.DelegationsHandler) { s.delega
 // SetTeamEventsHandler sets the team event history handler.
 func (s *Server) SetTeamEventsHandler(h *httpapi.TeamEventsHandler) { s.teamEventsHandler = h }
 
+// SetTeamAttachmentsHandler sets the team attachment download handler.
+func (s *Server) SetTeamAttachmentsHandler(h *httpapi.TeamAttachmentsHandler) {
+	s.teamAttachmentsHandler = h
+}
+
 // SetPendingMessagesHandler sets the pending messages handler.
 func (s *Server) SetPendingMessagesHandler(h *httpapi.PendingMessagesHandler) {
 	s.pendingMessagesHandler = h
@@ -639,9 +662,15 @@ func StartTestServer(s *Server, ctx context.Context) (addr string, start func())
 	if s.rateLimiter.Enabled() {
 		chatHandler.SetRateLimiter(s.rateLimiter.Allow)
 	}
+	if s.postTurn != nil {
+		chatHandler.SetPostTurnProcessor(s.postTurn)
+	}
 	mux.Handle("/v1/chat/completions", chatHandler)
 
 	responsesHandler := httpapi.NewResponsesHandler(s.agents, s.sessions, s.cfg.Gateway.Token)
+	if s.postTurn != nil {
+		responsesHandler.SetPostTurnProcessor(s.postTurn)
+	}
 	mux.Handle("/v1/responses", responsesHandler)
 
 	if s.tools != nil {

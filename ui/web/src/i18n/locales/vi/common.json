@@ -116,5 +116,10 @@
   "failedToLoadImage": "Không thể tải hình ảnh",
   "deleteFolder": "Xóa thư mục",
   "deleteFile": "Xóa tệp",
-  "loadMore": "Tải thêm..."
+  "loadMore": "Tải thêm...",
+  "viewCard": "Dạng thẻ",
+  "viewList": "Dạng danh sách",
+  "errors": {
+    "serverError": "Đã xảy ra lỗi. Vui lòng thử lại sau."
+  }
 }

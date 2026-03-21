@@ -161,6 +161,7 @@ func wireExtras(
 		ModelPricing:           appCfg.Telemetry.ModelPricing,
 		TracingStore:           stores.Tracing,
 		GlobalWorkspace:        workspace,
+		MemoryStore:            stores.Memory,
 		OnEvent: func(event agent.AgentEvent) {
 			msgBus.Broadcast(bus.Event{
 				Name:    protocol.EventAgent,
@@ -415,13 +416,12 @@ func wireExtras(
 		})
 	}
 
-	// Register team tools (team_tasks + team_message + workspace) if team store is available.
+	// Register team tools (team_tasks + workspace interceptor) if team store is available.
 	var postTurn tools.PostTurnProcessor
 	if stores.Teams != nil && stores.Agents != nil {
 		teamMgr := tools.NewTeamToolManager(stores.Teams, stores.Agents, msgBus, workspace)
 		postTurn = teamMgr
 		toolsReg.Register(tools.NewTeamTasksTool(teamMgr))
-		toolsReg.Register(tools.NewTeamMessageTool(teamMgr))
 		// Wire workspace interceptor into write_file so team workspace validation
 		// and event broadcasting happen transparently via existing file tools.
 		wsInterceptor := tools.NewWorkspaceInterceptor(teamMgr)

@@ -91,6 +91,9 @@ type ResolverDeps struct {
 
 	// Tracing store for budget enforcement queries
 	TracingStore store.TracingStore
+
+	// Memory store for extractive memory fallback
+	MemoryStore store.MemoryStore
 }
 
 // NewManagedResolver creates a ResolverFunc that builds Loops from DB agent data.
@@ -179,7 +182,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 		if !hasTeam {
 			contextFiles = append(contextFiles, bootstrap.ContextFile{
 				Path:    bootstrap.AvailabilityFile,
-				Content: "You are NOT part of any team. Do not use team_tasks or team_message tools.",
+				Content: "You are NOT part of any team. Do not use team_tasks tool.",
 			})
 		}
 
@@ -378,6 +381,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			ModelPricing:           deps.ModelPricing,
 			BudgetMonthlyCents:     derefInt(ag.BudgetMonthlyCents),
 			TracingStore:           deps.TracingStore,
+			MemoryStore:            deps.MemoryStore,
 		})
 
 		slog.Info("resolved agent from DB", "agent", agentKey, "model", ag.Model, "provider", ag.Provider)

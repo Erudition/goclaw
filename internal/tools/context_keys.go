@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 
 	"github.com/google/uuid"
@@ -262,7 +263,7 @@ func MemoryConfigFromCtx(ctx context.Context) *config.MemoryConfig {
 const ctxTeamID toolContextKey = "tool_team_id"
 
 // WithToolTeamID injects the dispatching team's ID into context so team
-// tools (team_tasks, team_message) and the WorkspaceInterceptor resolve
+// tools (team_tasks) and the WorkspaceInterceptor resolve
 // the correct team when the agent belongs to multiple teams.
 func WithToolTeamID(ctx context.Context, teamID string) context.Context {
 	return context.WithValue(ctx, ctxTeamID, teamID)
@@ -405,6 +406,27 @@ func PendingTeamDispatchFromCtx(ctx context.Context) *PendingTeamDispatch {
 	return v
 }
 
+// InjectTeamDispatch creates a fresh PendingTeamDispatch context for a direct
+// loop.Run() call (WS chat.send, HTTP API, etc.) and returns a drain function
+// that must be called after the run completes. The drain function dispatches
+// any pending team tasks via the provided PostTurnProcessor. It is safe to
+// call even if no tasks were created. Pass nil postTurn if not available.
+func InjectTeamDispatch(ctx context.Context, postTurn PostTurnProcessor) (context.Context, func()) {
+	ptd := NewPendingTeamDispatch()
+	ctx = WithPendingTeamDispatch(ctx, ptd)
+	drain := func() {
+		ptd.ReleaseTeamLock()
+		if postTurn != nil {
+			for teamID, taskIDs := range ptd.Drain() {
+				if err := postTurn.ProcessPendingTasks(context.Background(), teamID, taskIDs); err != nil {
+					slog.Warn("post_turn: dispatch failed", "team_id", teamID, "error", err)
+				}
+			}
+		}
+	}
+	return ctx, drain
+}
+
 // --- Run media file paths (for team workspace auto-collect) ---
 
 const ctxRunMediaPaths toolContextKey = "tool_run_media_paths"
@@ -432,6 +454,26 @@ func WithRunMediaNames(ctx context.Context, names map[string]string) context.Con
 func RunMediaNamesFromCtx(ctx context.Context) map[string]string {
 	v, _ := ctx.Value(ctxRunMediaNames).(map[string]string)
 	return v
+}
+
+// --- Iteration progress (loop → tools) ---
+
+const ctxIterProgress toolContextKey = "tool_iter_progress"
+
+// IterationProgress carries the agent loop's current iteration state
+// so tools can adapt behaviour (e.g. reduce output size) as the budget shrinks.
+type IterationProgress struct {
+	Current int
+	Max     int
+}
+
+func WithIterationProgress(ctx context.Context, p IterationProgress) context.Context {
+	return context.WithValue(ctx, ctxIterProgress, p)
+}
+
+func IterationProgressFromCtx(ctx context.Context) (IterationProgress, bool) {
+	v, ok := ctx.Value(ctxIterProgress).(IterationProgress)
+	return v, ok
 }
 
 // --- Per-agent sandbox config override ---

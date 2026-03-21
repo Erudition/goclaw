@@ -137,7 +137,10 @@ type Loop struct {
 
 	// Budget enforcement: monthly spending limit in cents (0 = unlimited)
 	budgetMonthlyCents int
-	tracingStore       store.TracingStore
+	tracingStore store.TracingStore
+
+	// Memory store for extractive memory fallback (writes directly when LLM flush fails)
+	memStore store.MemoryStore
 }
 
 // AgentEvent is emitted during agent execution for WS broadcasting.
@@ -255,7 +258,10 @@ type LoopConfig struct {
 
 	// Budget enforcement
 	BudgetMonthlyCents int
-	TracingStore       store.TracingStore
+	TracingStore store.TracingStore
+
+	// Memory store for extractive memory fallback (writes directly when LLM flush fails)
+	MemoryStore store.MemoryStore
 }
 
 const defaultMaxTokens = config.DefaultMaxTokens
@@ -345,6 +351,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		modelPricing:           cfg.ModelPricing,
 		budgetMonthlyCents:     cfg.BudgetMonthlyCents,
 		tracingStore:           cfg.TracingStore,
+		memStore:               cfg.MemoryStore,
 	}
 }
 
@@ -416,5 +423,6 @@ type RunResult struct {
 type MediaResult struct {
 	Path        string `json:"path"`                   // local file path
 	ContentType string `json:"content_type,omitempty"` // MIME type
+	Size        int64  `json:"size,omitempty"`          // file size in bytes
 	AsVoice     bool   `json:"as_voice,omitempty"`     // send as voice message (Telegram OGG)
 }
