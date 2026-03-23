@@ -15,6 +15,7 @@
 services:
   goclaw:
     image: goclaw-local:latest
+    pull_policy: build
     build:
       context: .
       dockerfile: Dockerfile
