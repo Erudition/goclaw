@@ -142,7 +142,7 @@ func (c *Channel) handleMessage(ev *slackevents.MessageEvent) {
 	// Determine local_key and thread context
 	localKey := channelID
 	threadTS := ev.ThreadTimeStamp
-	if !isDM && threadTS != "" {
+	if threadTS != "" {
 		localKey = fmt.Sprintf("%s:thread:%s", channelID, threadTS)
 	}
 
