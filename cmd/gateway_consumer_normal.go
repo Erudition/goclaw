@@ -57,6 +57,14 @@ func processNormalMessage(
 	}
 	sessionKey := sessions.BuildScopedSessionKey(agentID, msg.Channel, sessions.PeerKind(peerKind), msg.ChatID, cfg.Sessions.Scope, cfg.Sessions.DmScope, cfg.Sessions.MainKey)
 
+	// Thread-based isolation override (e.g. Slack threads or AI Panel)
+	if lk := msg.Metadata["local_key"]; lk != "" && strings.Contains(lk, ":thread:") {
+		parts := strings.Split(lk, ":thread:")
+		if len(parts) == 2 {
+			sessionKey = sessions.BuildScopedThreadSessionKey(agentID, msg.Channel, sessions.PeerKind(peerKind), msg.ChatID, parts[1])
+		}
+	}
+
 	// Forum topic: override session key to isolate per-topic history.
 	// TS ref: buildTelegramGroupPeerId() in src/telegram/bot/helpers.ts
 	if msg.Metadata["is_forum"] == "true" && peerKind == string(sessions.PeerGroup) {
