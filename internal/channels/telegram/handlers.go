@@ -267,6 +267,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 				Sender:    senderLabel,
 				SenderID:  senderID,
 				Body:      content,
+				MediaRefs: extractMediaRefs(message),
 				Timestamp: time.Unix(int64(message.Date), 0),
 				MessageID: fmt.Sprintf("%d", message.MessageID),
 			}, c.historyLimit)
@@ -322,6 +323,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 				Sender:    senderLabel,
 				SenderID:  senderID,
 				Body:      content,
+				MediaRefs: extractMediaRefs(message),
 				Timestamp: time.Unix(int64(message.Date), 0),
 				MessageID: fmt.Sprintf("%d", message.MessageID),
 			}, c.historyLimit)
@@ -467,6 +469,24 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	if isGroup {
 		annotated := fmt.Sprintf("[From: %s]\n%s", senderLabel, content)
 		if c.historyLimit > 0 {
+			// Resolve deferred media from history entries (lazy download).
+			if histRefs := c.groupHistory.CollectMediaRefs(localKey); len(histRefs) > 0 {
+				histMedia, histErrors := c.resolveMediaRefs(ctx, histRefs)
+				for _, m := range histMedia {
+					mediaFiles = append(mediaFiles, bus.MediaFile{
+						Path:     m.FilePath,
+						MimeType: m.ContentType,
+					})
+				}
+				if len(histMedia) > 0 {
+					histTags := buildMediaTags(histMedia)
+					annotated = histTags + "\n\n" + annotated
+				}
+				for _, e := range histErrors {
+					slog.Warn("telegram: history media download failed",
+						"type", e.Type, "reason", e.Reason)
+				}
+			}
 			finalContent = c.groupHistory.BuildContext(localKey, annotated, c.historyLimit)
 		} else {
 			finalContent = annotated
