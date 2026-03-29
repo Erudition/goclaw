@@ -27,10 +27,13 @@ type AgentsHandler struct {
 	providerReg      *providers.Registry
 	db               *sql.DB
 	tracingStore     store.TracingStore
-	defaultWorkspace string            // default workspace path template (e.g. "~/.goclaw/workspace")
-	msgBus           *bus.MessageBus   // for cache invalidation events (nil = no events)
-	summoner         *AgentSummoner    // LLM-based agent setup (nil = disabled)
-	isOwner          func(string) bool // checks if user ID is a system owner (nil = no owners configured)
+	memoryStore      store.MemoryStore         // for import (nil = disabled)
+	kgStore          store.KnowledgeGraphStore // for import (nil = disabled)
+	defaultWorkspace string                   // default workspace path template (e.g. "~/.goclaw/workspace")
+	dataDir          string                   // resolved data directory (e.g. "~/.goclaw/data") — for team workspace export
+	msgBus           *bus.MessageBus          // for cache invalidation events (nil = no events)
+	summoner         *AgentSummoner           // LLM-based agent setup (nil = disabled)
+	isOwner          func(string) bool        // checks if user ID is a system owner (nil = no owners configured)
 }
 
 // NewAgentsHandler creates a handler for agent management endpoints.
@@ -47,6 +50,17 @@ func NewAgentsHandler(agents store.AgentStore, providers store.ProviderStore, pr
 		summoner:         summoner,
 		isOwner:          isOwner,
 	}
+}
+
+// SetDataDir sets the resolved data directory used for team workspace paths.
+func (h *AgentsHandler) SetDataDir(dataDir string) {
+	h.dataDir = dataDir
+}
+
+// SetImportStores attaches optional stores needed for agent import.
+func (h *AgentsHandler) SetImportStores(mem store.MemoryStore, kg store.KnowledgeGraphStore) {
+	h.memoryStore = mem
+	h.kgStore = kg
 }
 
 // isOwnerUser checks if the given user ID is a system owner.
@@ -80,6 +94,20 @@ func (h *AgentsHandler) RegisterRoutes(mux *http.ServeMux) {
 	// Agent operations (admin+)
 	mux.HandleFunc("POST /v1/agents/{id}/regenerate", h.adminMiddleware(h.handleRegenerate))
 	mux.HandleFunc("POST /v1/agents/{id}/resummon", h.adminMiddleware(h.handleResummon))
+	// Export (agent owner or system owner)
+	mux.HandleFunc("GET /v1/agents/{id}/export/preview", h.authMiddleware(h.handleExportPreview))
+	mux.HandleFunc("GET /v1/agents/{id}/export", h.authMiddleware(h.handleExport))
+	mux.HandleFunc("GET /v1/agents/{id}/export/download/{token}", h.authMiddleware(h.handleExportDownload))
+	// Shared download route for all export types (skills, MCP, teams use same token map)
+	mux.HandleFunc("GET /v1/export/download/{token}", h.authMiddleware(h.handleExportDownload))
+	// Import (admin only — system owner or tenant admin)
+	mux.HandleFunc("POST /v1/agents/import/preview", h.adminMiddleware(h.handleImportPreview))
+	mux.HandleFunc("POST /v1/agents/import", h.adminMiddleware(h.handleImport))
+	mux.HandleFunc("POST /v1/agents/{id}/import", h.adminMiddleware(h.handleMergeImport))
+	// Team export/import (system owner only)
+	mux.HandleFunc("GET /v1/teams/{id}/export/preview", h.adminMiddleware(h.handleTeamExportPreview))
+	mux.HandleFunc("GET /v1/teams/{id}/export", h.adminMiddleware(h.handleTeamExport))
+	mux.HandleFunc("POST /v1/teams/import", h.adminMiddleware(h.handleTeamImport))
 	// Read-only (viewer+)
 	mux.HandleFunc("GET /v1/agents/{id}/codex-pool-activity", h.authMiddleware(h.handleCodexPoolActivity))
 	mux.HandleFunc("GET /v1/agents/{id}/instances", h.authMiddleware(h.handleListInstances))

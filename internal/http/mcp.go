@@ -1,6 +1,7 @@
 package http
 
 import (
+	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -30,6 +31,7 @@ type MCPHandler struct {
 	msgBus      *bus.MessageBus
 	mgr         MCPToolLister  // optional, nil when Manager not available
 	poolEvictor MCPPoolEvictor // optional, nil when pool not available
+	db          *sql.DB        // for export/import direct queries
 }
 
 // NewMCPHandler creates a handler for MCP server management endpoints.
@@ -82,6 +84,10 @@ func (h *MCPHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/mcp/requests", h.auth(h.handleCreateRequest))
 	mux.HandleFunc("GET /v1/mcp/requests", h.auth(h.handleListPendingRequests))
 	mux.HandleFunc("POST /v1/mcp/requests/{id}/review", h.adminAuth(h.handleReviewRequest))
+	// Export / Import (admin+)
+	mux.HandleFunc("GET /v1/mcp/export/preview", h.adminAuth(h.handleMCPExportPreview))
+	mux.HandleFunc("GET /v1/mcp/export", h.adminAuth(h.handleMCPExport))
+	mux.HandleFunc("POST /v1/mcp/import", h.adminAuth(h.handleMCPImport))
 }
 
 func (h *MCPHandler) auth(next http.HandlerFunc) http.HandlerFunc {

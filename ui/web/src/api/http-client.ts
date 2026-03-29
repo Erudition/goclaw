@@ -102,6 +102,11 @@ export class HttpClient {
     return url.toString();
   }
 
+  /** Public auth headers — for SSE streams and custom fetch calls. */
+  getAuthHeaders(): Record<string, string> {
+    return this.authHeaders();
+  }
+
   /** Auth-only headers (no Content-Type), for SSE / blob requests. */
   private authHeaders(): Record<string, string> {
     const h: Record<string, string> = {};

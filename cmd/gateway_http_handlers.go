@@ -26,6 +26,8 @@ func wireHTTP(stores *store.Stores, defaultWorkspace, dataDir, bundledSkillsDir 
 			summoner = httpapi.NewAgentSummoner(stores.Agents, providerReg, msgBus)
 		}
 		agentsH = httpapi.NewAgentsHandler(stores.Agents, stores.Providers, providerReg, stores.DB, stores.Tracing, defaultWorkspace, msgBus, summoner, isOwner)
+		agentsH.SetImportStores(stores.Memory, stores.KnowledgeGraph)
+		agentsH.SetDataDir(dataDir)
 	}
 
 	if stores != nil && stores.Skills != nil {
@@ -33,6 +35,7 @@ func wireHTTP(stores *store.Stores, defaultWorkspace, dataDir, bundledSkillsDir 
 			dirs := manageStore.Dirs()
 			if len(dirs) > 0 {
 				skillsH = httpapi.NewSkillsHandler(manageStore, dirs[0], dataDir, bundledSkillsDir, msgBus, stores.SkillTenantCfgs, stores.Tenants)
+				skillsH.SetDB(stores.DB)
 			}
 		}
 	}
@@ -43,6 +46,7 @@ func wireHTTP(stores *store.Stores, defaultWorkspace, dataDir, bundledSkillsDir 
 
 	if stores != nil && stores.MCP != nil {
 		mcpH = httpapi.NewMCPHandler(stores.MCP, msgBus, mcpToolLister)
+		mcpH.SetDB(stores.DB)
 	}
 	var mcpUserCredsH *httpapi.MCPUserCredentialsHandler
 	if stores != nil && stores.MCP != nil {
