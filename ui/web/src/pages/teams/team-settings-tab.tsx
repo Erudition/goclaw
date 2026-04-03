@@ -2,12 +2,15 @@ import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Save, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
 import { CHANNEL_TYPES } from "@/constants/channels";
 import type { TeamData, TeamAccessSettings, TeamNotifyConfig, EscalationMode, EscalationAction } from "@/types/team";
 import { useTeams } from "./hooks/use-teams";
 import { TeamNotificationsSection } from "./team-notifications-section";
 import { TeamAccessControlSection } from "./team-access-control-section";
 import { TeamOrchestrationSection } from "./team-orchestration-section";
+import { teamSettingsSchema, type TeamSettingsFormData } from "@/schemas/team-settings.schema";
 
 interface TeamSettingsTabProps {
   teamId: string;
@@ -15,130 +18,145 @@ interface TeamSettingsTabProps {
   onSaved: () => void;
 }
 
+function deriveDefaults(team: TeamData): TeamSettingsFormData {
+  const s = (team.settings ?? {}) as TeamAccessSettings;
+  const sn = s.notifications ?? {};
+  const smr = s.member_requests ?? {};
+  const sbe = s.blocker_escalation ?? {};
+  return {
+    notifyDispatched: sn.dispatched ?? true,
+    notifyProgress: sn.progress ?? false,
+    notifyFailed: sn.failed ?? false,
+    notifyCompleted: sn.completed ?? true,
+    notifyCommented: sn.commented ?? false,
+    notifyNewTask: sn.new_task ?? true,
+    notifySlowTool: sn.slow_tool ?? false,
+    notifyMode: sn.mode ?? "direct",
+    workspaceScope: s.workspace_scope ?? "isolated",
+    memberRequestsEnabled: smr.enabled ?? false,
+    memberRequestsAutoDispatch: smr.auto_dispatch ?? false,
+    blockerEscalationEnabled: sbe.enabled ?? true,
+    followupInterval: s.followup_interval_minutes ?? 30,
+    followupMaxReminders: s.followup_max_reminders ?? 0,
+    allowUserIds: s.allow_user_ids ?? [],
+    denyUserIds: s.deny_user_ids ?? [],
+    allowChannels: s.allow_channels ?? [],
+    denyChannels: s.deny_channels ?? [],
+  };
+}
+
 export function TeamSettingsTab({ teamId, team, onSaved }: TeamSettingsTabProps) {
   const { t } = useTranslation("teams");
   const { updateTeamSettings } = useTeams();
 
-  const initial = (team.settings ?? {}) as TeamAccessSettings;
-  const [allowUserIds, setAllowUserIds] = useState<string[]>(initial.allow_user_ids ?? []);
-  const [denyUserIds, setDenyUserIds] = useState<string[]>(initial.deny_user_ids ?? []);
-  const [allowChannels, setAllowChannels] = useState<string[]>(initial.allow_channels ?? []);
-  const [denyChannels, setDenyChannels] = useState<string[]>(initial.deny_channels ?? []);
-  const initNotify = initial.notifications ?? {};
-  const [notifyDispatched, setNotifyDispatched] = useState(initNotify.dispatched ?? true);
-  const [notifyProgress, setNotifyProgress] = useState(initNotify.progress ?? false);
-  const [notifyFailed, setNotifyFailed] = useState(initNotify.failed ?? false);
-  const [notifyCompleted, setNotifyCompleted] = useState(initNotify.completed ?? true);
-  const [notifyCommented, setNotifyCommented] = useState(initNotify.commented ?? false);
-  const [notifyNewTask, setNotifyNewTask] = useState(initNotify.new_task ?? true);
-  const [notifySlowTool, setNotifySlowTool] = useState(initNotify.slow_tool ?? false);
-  const [notifyMode, setNotifyMode] = useState<"direct" | "leader">(initNotify.mode ?? "direct");
-  const initMemberRequests = initial.member_requests ?? {};
-  const [memberRequestsEnabled, setMemberRequestsEnabled] = useState(initMemberRequests.enabled ?? false);
-  const [memberRequestsAutoDispatch, setMemberRequestsAutoDispatch] = useState(initMemberRequests.auto_dispatch ?? false);
-  const [escalationMode, setEscalationMode] = useState<EscalationMode | "">(initial.escalation_mode ?? "");
-  const [escalationActions, setEscalationActions] = useState<EscalationAction[]>(initial.escalation_actions ?? []);
-  const initBlockerEscalation = initial.blocker_escalation ?? {};
-  const [blockerEscalationEnabled, setBlockerEscalationEnabled] = useState(initBlockerEscalation.enabled ?? true);
-  const [followupInterval, setFollowupInterval] = useState<number>(initial.followup_interval_minutes ?? 30);
-  const [followupMaxReminders, setFollowupMaxReminders] = useState<number>(initial.followup_max_reminders ?? 0);
-  const [workspaceScope, setWorkspaceScope] = useState<string>(initial.workspace_scope ?? "isolated");
+  // UI-only state
   const [saving, setSaving] = useState(false);
 
+  const form = useForm<TeamSettingsFormData>({
+    resolver: zodResolver(teamSettingsSchema),
+    mode: "onChange",
+    defaultValues: deriveDefaults(team),
+  });
+
+  const { watch, setValue, reset } = form;
+
+  // Sync when team prop changes (e.g. after refetch)
   useEffect(() => {
-    const s = (team.settings ?? {}) as TeamAccessSettings;
-    setAllowUserIds(s.allow_user_ids ?? []);
-    setDenyUserIds(s.deny_user_ids ?? []);
-    setAllowChannels(s.allow_channels ?? []);
-    setDenyChannels(s.deny_channels ?? []);
-    const sn = s.notifications ?? {};
-    setNotifyDispatched(sn.dispatched ?? true);
-    setNotifyProgress(sn.progress ?? false);
-    setNotifyFailed(sn.failed ?? false);
-    setNotifyCompleted(sn.completed ?? true);
-    setNotifyCommented(sn.commented ?? false);
-    setNotifyNewTask(sn.new_task ?? true);
-    setNotifySlowTool(sn.slow_tool ?? false);
-    setNotifyMode(sn.mode ?? "direct");
-    const smr = s.member_requests ?? {};
-    setMemberRequestsEnabled(smr.enabled ?? false);
-    setMemberRequestsAutoDispatch(smr.auto_dispatch ?? false);
-    setEscalationMode(s.escalation_mode ?? "");
-    setEscalationActions(s.escalation_actions ?? []);
-    const sbe = s.blocker_escalation ?? {};
-    setBlockerEscalationEnabled(sbe.enabled ?? true);
-    setFollowupInterval(s.followup_interval_minutes ?? 30);
-    setFollowupMaxReminders(s.followup_max_reminders ?? 0);
-    setWorkspaceScope(s.workspace_scope ?? "isolated");
-  }, [team]);
+    reset(deriveDefaults(team));
+  }, [team, reset]);
+
+  const notifyDispatched = watch("notifyDispatched");
+  const notifyProgress = watch("notifyProgress");
+  const notifyFailed = watch("notifyFailed");
+  const notifyCompleted = watch("notifyCompleted");
+  const notifyCommented = watch("notifyCommented");
+  const notifyNewTask = watch("notifyNewTask");
+  const notifySlowTool = watch("notifySlowTool");
+  const notifyMode = watch("notifyMode");
+  const workspaceScope = watch("workspaceScope");
+  const memberRequestsEnabled = watch("memberRequestsEnabled");
+  const memberRequestsAutoDispatch = watch("memberRequestsAutoDispatch");
+  const blockerEscalationEnabled = watch("blockerEscalationEnabled");
+  const followupInterval = watch("followupInterval");
+  const followupMaxReminders = watch("followupMaxReminders");
+  const allowUserIds = watch("allowUserIds");
+  const denyUserIds = watch("denyUserIds");
+  const allowChannels = watch("allowChannels");
+  const denyChannels = watch("denyChannels");
+
+  // escalationMode / escalationActions remain uncontrolled (not in schema) — read from team settings directly
+  const initial = (team.settings ?? {}) as TeamAccessSettings;
+  const escalationMode: EscalationMode | "" = initial.escalation_mode ?? "";
+  const escalationActions: EscalationAction[] = initial.escalation_actions ?? [];
 
   const handleSave = useCallback(async () => {
     setSaving(true);
     try {
+      const data = form.getValues();
       const settings: TeamAccessSettings = {};
-      if (allowUserIds.length > 0) settings.allow_user_ids = allowUserIds;
-      if (denyUserIds.length > 0) settings.deny_user_ids = denyUserIds;
-      if (allowChannels.length > 0) settings.allow_channels = allowChannels;
-      if (denyChannels.length > 0) settings.deny_channels = denyChannels;
+      if (data.allowUserIds.length > 0) settings.allow_user_ids = data.allowUserIds;
+      if (data.denyUserIds.length > 0) settings.deny_user_ids = data.denyUserIds;
+      if (data.allowChannels.length > 0) settings.allow_channels = data.allowChannels;
+      if (data.denyChannels.length > 0) settings.deny_channels = data.denyChannels;
       const notifications: TeamNotifyConfig = {
-        dispatched: notifyDispatched,
-        progress: notifyProgress,
-        failed: notifyFailed,
-        slow_tool: notifySlowTool,
-        mode: notifyMode,
-        completed: notifyCompleted,
-        commented: notifyCommented,
-        new_task: notifyNewTask,
+        dispatched: data.notifyDispatched,
+        progress: data.notifyProgress,
+        failed: data.notifyFailed,
+        slow_tool: data.notifySlowTool,
+        mode: data.notifyMode,
+        completed: data.notifyCompleted,
+        commented: data.notifyCommented,
+        new_task: data.notifyNewTask,
       };
       settings.notifications = notifications;
-      if (memberRequestsEnabled) {
-        settings.member_requests = { enabled: true, auto_dispatch: memberRequestsAutoDispatch };
+      if (data.memberRequestsEnabled) {
+        settings.member_requests = { enabled: true, auto_dispatch: data.memberRequestsAutoDispatch };
       }
       if (escalationMode) {
         settings.escalation_mode = escalationMode;
         if (escalationActions.length > 0) settings.escalation_actions = escalationActions;
       }
-      settings.blocker_escalation = { enabled: blockerEscalationEnabled };
-      if (followupInterval !== 30) settings.followup_interval_minutes = followupInterval;
-      if (followupMaxReminders !== 0) settings.followup_max_reminders = followupMaxReminders;
-      settings.workspace_scope = workspaceScope || "isolated";
+      settings.blocker_escalation = { enabled: data.blockerEscalationEnabled };
+      if (data.followupInterval !== 30) settings.followup_interval_minutes = data.followupInterval;
+      if (data.followupMaxReminders !== 0) settings.followup_max_reminders = data.followupMaxReminders;
+      settings.workspace_scope = data.workspaceScope || "isolated";
       await updateTeamSettings(teamId, settings);
       onSaved();
     } catch { // toast shown by hook
     } finally {
       setSaving(false);
     }
-  }, [teamId, allowUserIds, denyUserIds, allowChannels, denyChannels, notifyDispatched, notifyProgress, notifyFailed, notifyCompleted, notifyCommented, notifyNewTask, notifySlowTool, notifyMode, memberRequestsEnabled, memberRequestsAutoDispatch, escalationMode, escalationActions, blockerEscalationEnabled, followupInterval, followupMaxReminders, workspaceScope, updateTeamSettings, onSaved]);
+  }, [teamId, form, escalationMode, escalationActions, updateTeamSettings, onSaved]);
 
   const channelOptions = CHANNEL_TYPES.map((c) => ({ value: c.value, label: c.label }));
 
   return (
     <div className="space-y-6">
       <TeamNotificationsSection
-        notifyDispatched={notifyDispatched} setNotifyDispatched={setNotifyDispatched}
-        notifyProgress={notifyProgress} setNotifyProgress={setNotifyProgress}
-        notifyFailed={notifyFailed} setNotifyFailed={setNotifyFailed}
-        notifyCompleted={notifyCompleted} setNotifyCompleted={setNotifyCompleted}
-        notifyCommented={notifyCommented} setNotifyCommented={setNotifyCommented}
-        notifyNewTask={notifyNewTask} setNotifyNewTask={setNotifyNewTask}
-        notifySlowTool={notifySlowTool} setNotifySlowTool={setNotifySlowTool}
-        notifyMode={notifyMode} setNotifyMode={setNotifyMode}
+        notifyDispatched={notifyDispatched} setNotifyDispatched={(v) => setValue("notifyDispatched", v)}
+        notifyProgress={notifyProgress} setNotifyProgress={(v) => setValue("notifyProgress", v)}
+        notifyFailed={notifyFailed} setNotifyFailed={(v) => setValue("notifyFailed", v)}
+        notifyCompleted={notifyCompleted} setNotifyCompleted={(v) => setValue("notifyCompleted", v)}
+        notifyCommented={notifyCommented} setNotifyCommented={(v) => setValue("notifyCommented", v)}
+        notifyNewTask={notifyNewTask} setNotifyNewTask={(v) => setValue("notifyNewTask", v)}
+        notifySlowTool={notifySlowTool} setNotifySlowTool={(v) => setValue("notifySlowTool", v)}
+        notifyMode={notifyMode} setNotifyMode={(v) => setValue("notifyMode", v)}
       />
 
       <TeamOrchestrationSection
-        workspaceScope={workspaceScope} setWorkspaceScope={setWorkspaceScope}
-        memberRequestsEnabled={memberRequestsEnabled} setMemberRequestsEnabled={setMemberRequestsEnabled}
-        memberRequestsAutoDispatch={memberRequestsAutoDispatch} setMemberRequestsAutoDispatch={setMemberRequestsAutoDispatch}
-        blockerEscalationEnabled={blockerEscalationEnabled} setBlockerEscalationEnabled={setBlockerEscalationEnabled}
-        followupInterval={followupInterval} setFollowupInterval={setFollowupInterval}
-        followupMaxReminders={followupMaxReminders} setFollowupMaxReminders={setFollowupMaxReminders}
+        workspaceScope={workspaceScope} setWorkspaceScope={(v) => setValue("workspaceScope", v)}
+        memberRequestsEnabled={memberRequestsEnabled} setMemberRequestsEnabled={(v) => setValue("memberRequestsEnabled", v)}
+        memberRequestsAutoDispatch={memberRequestsAutoDispatch} setMemberRequestsAutoDispatch={(v) => setValue("memberRequestsAutoDispatch", v)}
+        blockerEscalationEnabled={blockerEscalationEnabled} setBlockerEscalationEnabled={(v) => setValue("blockerEscalationEnabled", v)}
+        followupInterval={followupInterval} setFollowupInterval={(v) => setValue("followupInterval", v)}
+        followupMaxReminders={followupMaxReminders} setFollowupMaxReminders={(v) => setValue("followupMaxReminders", v)}
       />
 
       <TeamAccessControlSection
-        allowUserIds={allowUserIds} setAllowUserIds={setAllowUserIds}
-        denyUserIds={denyUserIds} setDenyUserIds={setDenyUserIds}
-        allowChannels={allowChannels} setAllowChannels={setAllowChannels}
-        denyChannels={denyChannels} setDenyChannels={setDenyChannels}
+        allowUserIds={allowUserIds} setAllowUserIds={(v) => setValue("allowUserIds", v)}
+        denyUserIds={denyUserIds} setDenyUserIds={(v) => setValue("denyUserIds", v)}
+        allowChannels={allowChannels} setAllowChannels={(v) => setValue("allowChannels", v)}
+        denyChannels={denyChannels} setDenyChannels={(v) => setValue("denyChannels", v)}
         channelOptions={channelOptions}
       />
 

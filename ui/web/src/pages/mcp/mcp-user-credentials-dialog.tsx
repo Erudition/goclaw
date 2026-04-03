@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
 import { KeyRound, Loader2 } from "lucide-react";
 import {
   Dialog,
@@ -20,6 +22,7 @@ import { useAuthStore } from "@/stores/use-auth-store";
 import { useTenants } from "@/hooks/use-tenants";
 import i18next from "i18next";
 import type { MCPServerData, MCPUserCredentialStatus, MCPUserCredentialInput } from "./hooks/use-mcp";
+import { mcpUserCredentialsSchema, type MCPUserCredentialsFormData } from "@/schemas/mcp-credentials.schema";
 
 /** Header keys whose values should be masked. */
 const SENSITIVE_HEADER_RE = /^(authorization|bearer)|(key|secret|token|password|credential)/i;
@@ -56,20 +59,24 @@ export function MCPUserCredentialsDialog({
     currentTenant?.role === "owner" ||
     currentTenant?.role === "admin";
 
+  // UI-only state
   const [selectedUserId, setSelectedUserId] = useState(currentUserId);
-  // Separate search text from selected value — onChange fires on every keystroke,
-  // but we only want to load credentials when user actually selects from dropdown
   const [userSearchText, setUserSearchText] = useState("");
-
   const [status, setStatus] = useState<MCPUserCredentialStatus | null>(null);
   const [loadingStatus, setLoadingStatus] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [initialLoad, setInitialLoad] = useState(true);
 
-  const [apiKey, setApiKey] = useState("");
-  const [headers, setHeaders] = useState<Record<string, string>>({});
-  const [env, setEnv] = useState<Record<string, string>>({});
+  const form = useForm<MCPUserCredentialsFormData>({
+    resolver: zodResolver(mcpUserCredentialsSchema),
+    mode: "onChange",
+    defaultValues: { apiKey: "", headers: {}, env: {} },
+  });
 
+  const { register, watch, setValue, reset } = form;
+  const headers = watch("headers") as Record<string, string>;
+  const env = watch("env") as Record<string, string>;
 
   // Reset state when dialog opens
   useEffect(() => {
@@ -80,15 +87,9 @@ export function MCPUserCredentialsDialog({
     }
   }, [open, currentUserId]);
 
-  // Track whether this is the initial load (show full spinner) vs user switch (keep form visible)
-  const [initialLoad, setInitialLoad] = useState(true);
-
   useEffect(() => {
     if (!open) return;
-    setApiKey("");
-    setHeaders({});
-    setEnv({});
-    // Only show full-page spinner on initial dialog open, not on user switch
+    reset({ apiKey: "", headers: {}, env: {} });
     if (initialLoad) {
       setStatus(null);
       setLoadingStatus(true);
@@ -103,10 +104,11 @@ export function MCPUserCredentialsDialog({
   const handleSave = async () => {
     setSaving(true);
     try {
+      const data = form.getValues();
       const creds: MCPUserCredentialInput = {};
-      if (apiKey.trim()) creds.api_key = apiKey.trim();
-      if (Object.keys(headers).length > 0) creds.headers = headers;
-      if (Object.keys(env).length > 0) creds.env = env;
+      if (data.apiKey.trim()) creds.api_key = data.apiKey.trim();
+      if (Object.keys(data.headers).length > 0) creds.headers = data.headers as Record<string, string>;
+      if (Object.keys(data.env).length > 0) creds.env = data.env as Record<string, string>;
       const targetUser = canManageUsers ? selectedUserId : undefined;
       await onSetCredentials(server.id, creds, targetUser);
       toast.success(i18next.t("mcp:userCredentials.saved"));
@@ -196,19 +198,18 @@ export function MCPUserCredentialsDialog({
               <Input
                 id="uc-api-key"
                 type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
                 placeholder={t("userCredentials.apiKeyPlaceholder")}
                 className="text-base md:text-sm font-mono"
+                {...register("apiKey")}
               />
             </div>
 
-            {/* Headers — KeyValueEditor with sensitive masking */}
+            {/* Headers */}
             <div className="flex flex-col gap-1.5">
               <Label>{t("userCredentials.headers")}</Label>
               <KeyValueEditor
                 value={headers}
-                onChange={setHeaders}
+                onChange={(v) => setValue("headers", v)}
                 keyPlaceholder="Header"
                 valuePlaceholder="Value"
                 addLabel={t("userCredentials.addHeader")}
@@ -216,12 +217,12 @@ export function MCPUserCredentialsDialog({
               />
             </div>
 
-            {/* Env vars — KeyValueEditor with sensitive masking */}
+            {/* Env vars */}
             <div className="flex flex-col gap-1.5">
               <Label>{t("userCredentials.env")}</Label>
               <KeyValueEditor
                 value={env}
-                onChange={setEnv}
+                onChange={(v) => setValue("env", v)}
                 keyPlaceholder="ENV_KEY"
                 valuePlaceholder="value"
                 addLabel={t("userCredentials.addEnv")}
