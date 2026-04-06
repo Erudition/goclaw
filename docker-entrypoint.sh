@@ -72,6 +72,25 @@ if [ -x /app/pkg-helper ] && [ "$(id -u)" = "0" ]; then
   fi
 fi
 
+# Copy Claude CLI credentials from root-owned read-only mount to goclaw-accessible location.
+# /app/.claude is a symlink → /app/data/.claude (writable volume, see Dockerfile).
+# Uses su-exec to copy as goclaw user because sandbox overlay's cap_add override
+# may remove CHOWN needed by install(1). umask 077 ensures file is created with 600.
+if [ -f /app/.claude-host/.credentials.json ]; then
+  (mkdir -p /app/data/.claude \
+    && if command -v su-exec >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
+         su-exec goclaw sh -c 'umask 077 && cp /app/.claude-host/.credentials.json /app/data/.claude/.credentials.json'
+       else
+         ( umask 077 && cp /app/.claude-host/.credentials.json /app/data/.claude/.credentials.json )
+       fi \
+    && echo "Claude CLI credentials synced from host.") || echo "WARNING: Claude credentials copy failed (non-fatal)"
+fi
+
+# Warn if Claude credentials are mounted but CLI binary is missing (forgot --build).
+if [ -d /app/.claude-host ] && ! command -v claude >/dev/null 2>&1; then
+  echo "WARNING: Claude credentials mounted but claude CLI not installed. Rebuild with: --build"
+fi
+
 # Run command with privilege drop (su-exec in Docker, direct otherwise).
 run_as_goclaw() {
   if command -v su-exec >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then

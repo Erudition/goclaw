@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -31,6 +32,10 @@ func ScanSkillDeps(skillDir string) *SkillManifest {
 // stdlib/pip resolution is handled at check time via PYTHONPATH.
 func scanScriptsDir(scriptsDir string) *SkillManifest {
 	m := &SkillManifest{ScriptsDir: scriptsDir}
+
+	if _, err := os.Stat(scriptsDir); os.IsNotExist(err) {
+		return m
+	}
 
 	pyImports := make(map[string]bool)
 	nodeImports := make(map[string]bool)
@@ -86,6 +91,11 @@ func scanScriptsDir(scriptsDir string) *SkillManifest {
 		m.Requires = append(m.Requires, "node")
 	}
 
+	if !m.IsEmpty() {
+		slog.Debug("dep_scanner: scanned", "dir", scriptsDir,
+			"bins", len(m.Requires), "py", len(m.RequiresPython), "node", len(m.RequiresNode))
+	}
+
 	return m
 }
 
@@ -95,6 +105,9 @@ var (
 	nodeRequireRe  = regexp.MustCompile(`require\(['"]([\w@][^'"]*)['"]\)`)
 	nodeESImportRe = regexp.MustCompile(`from\s+['"]([^'"./][^'"]*?)['"]`)
 	shebangRe      = regexp.MustCompile(`^#!\s*/usr/bin/env\s+(\S+)`)
+	// Detects JS ES module pattern: `import X from '...'` or `from '...'`.
+	// Used to skip false positives when JS imports appear inside Python string literals.
+	jsFromStringRe = regexp.MustCompile(`from\s+['"]`)
 )
 
 func scanFile(path string, pyImports, nodeImports map[string]bool, binaries map[string]bool) {
@@ -118,7 +131,10 @@ func scanFile(path string, pyImports, nodeImports map[string]bool, binaries map[
 		for _, line := range strings.Split(content, "\n") {
 			line = strings.TrimSpace(line)
 			if m := pyImportRe.FindStringSubmatch(line); len(m) > 1 {
-				pyImports[m[1]] = true
+				// Skip JS ES module imports inside string literals (e.g. `import mermaid from '...'`)
+				if !jsFromStringRe.MatchString(line) {
+					pyImports[m[1]] = true
+				}
 			}
 			if m := pyFromRe.FindStringSubmatch(line); len(m) > 1 {
 				pyImports[m[1]] = true

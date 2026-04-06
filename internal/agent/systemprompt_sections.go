@@ -29,6 +29,8 @@ func buildMCPToolsSearchSection() []string {
 		"2. Matching tools are activated immediately and can be called right away in the same turn.",
 		"3. If no match found, proceed with other available tools.",
 		"",
+		"**Optional parameters:** Only include if you have a concrete value from user context. Do not send empty strings or placeholders — omit the field entirely. The tool will use sensible defaults.",
+		"",
 	}
 }
 
@@ -39,6 +41,8 @@ func buildMCPToolsInlineSection(descs map[string]string) []string {
 		"## MCP Tools (prefer over core tools)",
 		"",
 		"External tool integrations (MCP servers). **When an MCP tool overlaps with a core tool, always prefer the MCP tool.**",
+		"",
+		"**Optional parameters:** Only include if you have a concrete value from user context. Do not send empty strings or placeholders — omit the field entirely. The tool will use sensible defaults.",
 		"",
 	}
 	for name, desc := range descs {
@@ -131,12 +135,8 @@ func buildProjectContextSection(files []bootstrap.ContextFile, agentType string)
 		}
 	}
 
-	if hasBootstrap {
-		lines = append(lines,
-			"",
-			"IMPORTANT: BOOTSTRAP.md is present — this is your FIRST RUN. You MUST follow the instructions in BOOTSTRAP.md before doing anything else. Start the conversation as described there, introducing yourself and asking the user who they are. Do NOT respond with a generic greeting.",
-		)
-	}
+	// Bootstrap reminder removed — the FIRST RUN section in BuildSystemPrompt()
+	// provides stronger, earlier framing. Duplicate reminders dilute the signal.
 
 	if isPredefined && hasUserPredefined {
 		lines = append(lines,
@@ -360,6 +360,16 @@ func hasBootstrapFile(files []bootstrap.ContextFile) bool {
 	return false
 }
 
+// findContextFileContent returns the content of a context file by name, or "" if not found.
+func findContextFileContent(files []bootstrap.ContextFile, name string) string {
+	for _, f := range files {
+		if f.Path == name {
+			return f.Content
+		}
+	}
+	return ""
+}
+
 // hasTeamWorkspace checks if team_tasks is in the tool list (indicates team context).
 func hasTeamWorkspace(toolNames []string) bool {
 	return slices.Contains(toolNames, "team_tasks")
@@ -392,7 +402,8 @@ func buildTeamWorkspaceSection(teamWsPath string) []string {
 }
 
 // buildTeamMembersSection lists team members so the agent knows who to assign tasks to.
-func buildTeamMembersSection(members []store.TeamMemberData) []string {
+// teamGuidance is injected from TeamActionPolicy.MemberGuidance() — varies by edition.
+func buildTeamMembersSection(members []store.TeamMemberData, teamGuidance string) []string {
 	lines := []string{
 		"## Team Members",
 		"",
@@ -413,7 +424,10 @@ func buildTeamMembersSection(members []store.TeamMemberData) []string {
 		"",
 		"When creating tasks with team_tasks, set assignee to the agent_key of the best-suited member.",
 		"Do NOT invent agent keys — only use the keys listed above.",
-		"",
 	)
+	if teamGuidance != "" {
+		lines = append(lines, teamGuidance)
+	}
+	lines = append(lines, "")
 	return lines
 }

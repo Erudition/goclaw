@@ -4,9 +4,9 @@ import i18next from "i18next";
 import { useHttp } from "@/hooks/use-ws";
 import { queryKeys } from "@/lib/query-keys";
 import { toast } from "@/stores/use-toast-store";
-import type { MCPServerData, MCPServerInput, MCPAgentGrant, MCPToolInfo } from "@/types/mcp";
+import type { MCPServerData, MCPServerInput, MCPAgentGrant, MCPToolInfo, MCPUserCredentialStatus, MCPUserCredentialInput } from "@/types/mcp";
 
-export type { MCPServerData, MCPServerInput, MCPAgentGrant, MCPToolInfo };
+export type { MCPServerData, MCPServerInput, MCPAgentGrant, MCPToolInfo, MCPUserCredentialStatus, MCPUserCredentialInput };
 
 export function useMCP() {
   const http = useHttp();
@@ -109,10 +109,47 @@ export function useMCP() {
     [http],
   );
 
+  const reconnectServer = useCallback(
+    async (id: string) => {
+      try {
+        await http.post(`/v1/mcp/servers/${id}/reconnect`, {});
+        toast.success(i18next.t("mcp:toast.reconnected"));
+      } catch (err) {
+        toast.error(i18next.t("mcp:toast.failedReconnect"), err instanceof Error ? err.message : "");
+        throw err;
+      }
+    },
+    [http],
+  );
+
   const listServerTools = useCallback(
     async (serverId: string) => {
       const res = await http.get<{ tools: MCPToolInfo[] }>(`/v1/mcp/servers/${serverId}/tools`);
       return res.tools ?? [];
+    },
+    [http],
+  );
+
+  const getUserCredentials = useCallback(
+    async (serverId: string, userId?: string) => {
+      const qs = userId ? `?user_id=${encodeURIComponent(userId)}` : "";
+      return http.get<MCPUserCredentialStatus>(`/v1/mcp/servers/${serverId}/user-credentials${qs}`);
+    },
+    [http],
+  );
+
+  const setUserCredentials = useCallback(
+    async (serverId: string, creds: MCPUserCredentialInput, userId?: string) => {
+      const qs = userId ? `?user_id=${encodeURIComponent(userId)}` : "";
+      await http.put(`/v1/mcp/servers/${serverId}/user-credentials${qs}`, creds);
+    },
+    [http],
+  );
+
+  const deleteUserCredentials = useCallback(
+    async (serverId: string, userId?: string) => {
+      const qs = userId ? `?user_id=${encodeURIComponent(userId)}` : "";
+      await http.delete(`/v1/mcp/servers/${serverId}/user-credentials${qs}`);
     },
     [http],
   );
@@ -129,6 +166,10 @@ export function useMCP() {
     revokeAgent,
     listGrantsByAgent,
     testConnection,
+    reconnectServer,
     listServerTools,
+    getUserCredentials,
+    setUserCredentials,
+    deleteUserCredentials,
   };
 }

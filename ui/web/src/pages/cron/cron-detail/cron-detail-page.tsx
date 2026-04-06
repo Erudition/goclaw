@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
-import type { CronJob, CronRunLogEntry } from "../hooks/use-cron";
+import type { CronJob, CronJobPatch, CronRunLogEntry } from "../hooks/use-cron";
 import { CronHeader } from "./cron-header";
 import { CronOverviewTab } from "./cron-overview-tab";
 import { CronRunHistoryTab } from "./cron-run-history-tab";
@@ -14,7 +14,7 @@ interface CronDetailPageProps {
   onRun: (id: string) => Promise<void>;
   onToggle: (id: string, enabled: boolean) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
-  onUpdate?: (id: string, params: Record<string, unknown>) => Promise<void>;
+  onUpdate?: (id: string, params: CronJobPatch) => Promise<void>;
   getRunLog: (id: string, limit?: number, offset?: number) => Promise<{ entries: CronRunLogEntry[]; total: number }>;
   onRefresh: () => void;
 }
@@ -69,8 +69,8 @@ export function CronDetailPage({
         onDelete={() => setConfirmDelete(true)}
       />
 
-      <div className="p-3 sm:p-4">
-        <div className="max-w-4xl">
+      <div className="p-3 pb-10 sm:p-4 sm:pb-10">
+        <div className="mx-auto max-w-4xl">
           <Tabs value={activeTab} onValueChange={setActiveTab}>
             <TabsList className="w-full justify-start overflow-x-auto overflow-y-hidden">
               <TabsTrigger value="overview">{t("detail.tabs.overview")}</TabsTrigger>

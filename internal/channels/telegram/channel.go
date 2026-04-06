@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mymmrac/telego"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
@@ -41,10 +42,12 @@ type Channel struct {
 	groupHistory     *channels.PendingHistory
 	historyLimit     int
 	requireMention   bool
+	mentionMode      string // "strict" (default) or "yield"
 	pollCancel       context.CancelFunc // cancels the long polling context
 	pollDone         chan struct{}       // closed when polling goroutine exits
 	handlerWg        sync.WaitGroup     // tracks in-flight handler goroutines for graceful shutdown
 	handlerSem       chan struct{}       // bounded semaphore for concurrent handler goroutines
+	pendingDraftID   sync.Map           // localKey string → int (draftID)
 }
 
 type thinkingCancel struct {
@@ -83,7 +86,7 @@ func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.Pai
 	}
 
 	httpClient := &http.Client{
-		Timeout:   30 * time.Second,
+		Timeout:   60 * time.Second, // Must exceed getUpdates Timeout to avoid long-poll race (#361)
 		Transport: transport,
 	}
 	// Apply ForceIPv4 at init if configured (explicit, predictable, no runtime heuristic).
@@ -112,6 +115,15 @@ func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.Pai
 		historyLimit = channels.DefaultGroupHistoryLimit
 	}
 
+	mentionMode := cfg.MentionMode
+	if mentionMode == "" {
+		mentionMode = "strict"
+	}
+	if mentionMode != "strict" && mentionMode != "yield" {
+		slog.Warn("telegram: unknown mention_mode, defaulting to strict", "value", mentionMode)
+		mentionMode = "strict"
+	}
+
 	return &Channel{
 		BaseChannel:     base,
 		bot:             bot,
@@ -122,9 +134,10 @@ func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.Pai
 		agentStore:      agentStore,
 		configPermStore: configPermStore,
 		teamStore:       teamStore,
-		groupHistory:    channels.MakeHistory(channels.TypeTelegram, pendingStore),
+		groupHistory:    channels.MakeHistory(channels.TypeTelegram, pendingStore, base.TenantID()),
 		historyLimit:    historyLimit,
 		requireMention:  requireMention,
+		mentionMode:     mentionMode,
 	}, nil
 }
 
@@ -139,7 +152,7 @@ func (c *Channel) Start(ctx context.Context) error {
 	c.pollDone = make(chan struct{})
 
 	updates, err := c.bot.UpdatesViaLongPolling(pollCtx, &telego.GetUpdatesParams{
-		Timeout: 30,
+		Timeout: 25, // Long-poll seconds; keep below HTTP client Timeout (#361)
 		AllowedUpdates: []string{
 			"message",
 			"edited_message",
@@ -276,6 +289,9 @@ func (c *Channel) BlockReplyEnabled() *bool { return c.config.BlockReply }
 func (c *Channel) SetPendingCompaction(cfg *channels.CompactionConfig) {
 	c.groupHistory.SetCompactionConfig(cfg)
 }
+
+// SetPendingHistoryTenantID propagates tenant_id to the pending history for DB operations.
+func (c *Channel) SetPendingHistoryTenantID(id uuid.UUID) { c.groupHistory.SetTenantID(id) }
 
 // Stop shuts down the Telegram bot by cancelling the long polling context
 // and waiting for the polling goroutine to exit.

@@ -8,8 +8,7 @@ import {
 } from "@/components/ui/select";
 import { Combobox, type ComboboxOption } from "@/components/ui/combobox";
 import { useConfigPermissions, type ConfigPermission } from "../hooks/use-config-permissions";
-import { useContactSearch } from "../hooks/use-contact-search";
-import type { ChannelContact } from "@/types/contact";
+import { UserPickerCombobox } from "@/components/shared/user-picker-combobox";
 
 const CONFIG_TYPES = [
   { value: "file_writer",   label: "File Writer",   descKey: "permissions.types.file_writer_desc" },
@@ -48,19 +47,6 @@ export function AgentPermissionsTab({ agentId }: AgentPermissionsTabProps) {
   const [scope, setScope] = useState("group:*");
   const [permission, setPermission] = useState("allow");
   const [adding, setAdding] = useState(false);
-  const [selectedContact, setSelectedContact] = useState<ChannelContact | null>(null);
-
-  const { contacts } = useContactSearch(userId);
-
-  const contactOptions: ComboboxOption[] = useMemo(() =>
-    contacts.map((c) => {
-      const name = c.display_name || c.sender_id;
-      const username = c.username ? ` @${c.username}` : "";
-      const channel = c.channel_type ? ` [${c.channel_type}]` : "";
-      return { value: c.sender_id, label: `${name}${username} (${c.sender_id})${channel}` };
-    }),
-    [contacts],
-  );
 
   // Collect existing file_writer scopes for dynamic scope options
   const existingFileWriterScopes = useMemo(() =>
@@ -88,25 +74,11 @@ export function AgentPermissionsTab({ agentId }: AgentPermissionsTabProps) {
 
   useEffect(() => { load(); }, [load]);
 
-  const handleUserChange = (val: string) => {
-    setUserId(val);
-    const contact = contacts.find((c) => c.sender_id === val);
-    setSelectedContact(contact ?? null);
-  };
-
   const handleAdd = async () => {
     if (!userId.trim()) return;
     setAdding(true);
-    const meta =
-      configType === "file_writer" && selectedContact
-        ? {
-            displayName: selectedContact.display_name ?? "",
-            username: selectedContact.username ?? "",
-          }
-        : undefined;
-    await grant(scope, configType, userId.trim(), permission, meta);
+    await grant(scope, configType, userId.trim(), permission);
     setUserId("");
-    setSelectedContact(null);
     setAdding(false);
   };
 
@@ -158,10 +130,9 @@ export function AgentPermissionsTab({ agentId }: AgentPermissionsTabProps) {
       {/* Add Rule form */}
       <div className="space-y-2">
         <div className="flex flex-wrap items-end gap-2">
-          <Combobox
+          <UserPickerCombobox
             value={userId}
-            onChange={handleUserChange}
-            options={contactOptions}
+            onChange={setUserId}
             placeholder={t("permissions.userIdPlaceholder")}
             className="flex-1 min-w-[160px]"
           />

@@ -19,6 +19,7 @@ type ChannelContact struct {
 	Username        *string    `json:"username,omitempty"`
 	AvatarURL       *string    `json:"avatar_url,omitempty"`
 	PeerKind        *string    `json:"peer_kind,omitempty"`
+	ContactType     string     `json:"contact_type"` // "user" or "group"
 	MergedID        *uuid.UUID `json:"merged_id,omitempty"`
 	FirstSeenAt     time.Time  `json:"first_seen_at"`
 	LastSeenAt      time.Time  `json:"last_seen_at"`
@@ -37,7 +38,7 @@ type ContactListOpts struct {
 type ContactStore interface {
 	// UpsertContact creates or updates a contact. On conflict (channel_type, sender_id),
 	// updates display_name, username, user_id, channel_instance, and last_seen_at.
-	UpsertContact(ctx context.Context, channelType, channelInstance, senderID, userID, displayName, username, peerKind string) error
+	UpsertContact(ctx context.Context, channelType, channelInstance, senderID, userID, displayName, username, peerKind, contactType string) error
 
 	// ListContacts searches contacts with pagination and filters.
 	ListContacts(ctx context.Context, opts ContactListOpts) ([]ChannelContact, error)
@@ -49,7 +50,26 @@ type ContactStore interface {
 	// Returns a map of sender_id → ChannelContact (first match per sender_id).
 	GetContactsBySenderIDs(ctx context.Context, senderIDs []string) (map[string]ChannelContact, error)
 
-	// MergeContacts assigns the same merged_id to all given contact IDs,
-	// linking them as the same person across channels.
-	MergeContacts(ctx context.Context, contactIDs []uuid.UUID) error
+	// GetContactByID returns a single contact by primary key. Tenant-scoped via context.
+	GetContactByID(ctx context.Context, id uuid.UUID) (*ChannelContact, error)
+
+	// GetSenderIDsByContactIDs returns sender_id strings for the given contact UUIDs in one query.
+	GetSenderIDsByContactIDs(ctx context.Context, contactIDs []uuid.UUID) ([]string, error)
+
+	// MergeContacts sets merged_id = tenantUserID on all given contact IDs,
+	// linking them to a tenant_users identity. Tenant-scoped via context.
+	MergeContacts(ctx context.Context, contactIDs []uuid.UUID, tenantUserID uuid.UUID) error
+
+	// UnmergeContacts sets merged_id = NULL on the given contact IDs.
+	// Tenant-scoped via context.
+	UnmergeContacts(ctx context.Context, contactIDs []uuid.UUID) error
+
+	// GetContactsByMergedID returns all contacts linked to a given merged_id.
+	// Tenant-scoped via context.
+	GetContactsByMergedID(ctx context.Context, mergedID uuid.UUID) ([]ChannelContact, error)
+
+	// ResolveTenantUserID looks up a contact by (channelType, senderID) and, if
+	// the contact has been merged, returns the linked tenant_user's user_id.
+	// Returns ("", nil) when the contact is not found or not merged.
+	ResolveTenantUserID(ctx context.Context, channelType, senderID string) (string, error)
 }

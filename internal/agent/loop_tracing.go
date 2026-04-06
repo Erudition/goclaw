@@ -65,9 +65,14 @@ func (l *Loop) emitLLMSpanStart(ctx context.Context, start time.Time, iteration 
 		span.AgentID = &l.agentUUID
 	}
 	span.TeamID = tracing.TraceTeamIDPtrFromContext(ctx)
+	span.TenantID = store.TenantIDFromContext(ctx)
+	if span.TenantID == uuid.Nil {
+		span.TenantID = store.MasterTenantID
+	}
 
-	// Verbose mode: include input messages (same stripping as emitLLMSpan).
-	if collector.Verbose() && len(messages) > 0 {
+	// Include input messages preview as truncated JSON.
+	if len(messages) > 0 {
+		previewLimit := previewLimitForVerbose(collector.Verbose())
 		stripped := make([]providers.Message, len(messages))
 		copy(stripped, messages)
 		for i := range stripped {
@@ -80,7 +85,7 @@ func (l *Loop) emitLLMSpanStart(ctx context.Context, start time.Time, iteration 
 			}
 		}
 		if b, err := json.Marshal(stripped); err == nil {
-			span.InputPreview = truncateStr(string(b), 100000)
+			span.InputPreview = tracing.TruncateJSON(string(b), previewLimit)
 		}
 	}
 
@@ -107,6 +112,7 @@ func (l *Loop) emitLLMSpanEnd(ctx context.Context, spanID uuid.UUID, start time.
 		"duration_ms": int(now.Sub(start).Milliseconds()),
 		"status":      store.SpanStatusCompleted,
 	}
+	var spanMetadata json.RawMessage
 
 	if callErr != nil {
 		updates["status"] = store.SpanStatusError
@@ -128,7 +134,7 @@ func (l *Loop) emitLLMSpanEnd(ctx context.Context, spanID uuid.UUID, start time.
 					meta["thinking_tokens"] = resp.Usage.ThinkingTokens
 				}
 				if b, err := json.Marshal(meta); err == nil {
-					updates["metadata"] = b
+					spanMetadata = b
 				}
 			}
 		}
@@ -140,16 +146,24 @@ func (l *Loop) emitLLMSpanEnd(ctx context.Context, spanID uuid.UUID, start time.
 			}
 		}
 		updates["finish_reason"] = resp.FinishReason
-		verbose := collector.Verbose()
-		if verbose {
-			preview := resp.Content
-			if resp.Thinking != "" {
-				preview = "<thinking>\n" + resp.Thinking + "\n</thinking>\n" + resp.Content
-			}
-			updates["output_preview"] = truncateStr(preview, 100000)
-		} else {
-			updates["output_preview"] = truncateStr(resp.Content, 500)
+		limit := previewLimitForVerbose(collector.Verbose())
+		preview := resp.Content
+		if resp.Thinking != "" {
+			preview = "<thinking>\n" + resp.Thinking + "\n</thinking>\n" + resp.Content
 		}
+		updates["output_preview"] = tracing.TruncateMid(preview, limit)
+	}
+	if observation := providers.ChatGPTOAuthRoutingObservationFromContext(ctx); observation != nil {
+		evidence := observation.Snapshot()
+		if evidence.HasData() {
+			spanMetadata = providers.MergeChatGPTOAuthRoutingMetadata(spanMetadata, evidence)
+			if evidence.ServingProvider != "" {
+				updates["provider"] = evidence.ServingProvider
+			}
+		}
+	}
+	if len(spanMetadata) > 0 {
+		updates["metadata"] = spanMetadata
 	}
 
 	collector.EmitSpanUpdate(spanID, traceID, updates)
@@ -169,10 +183,7 @@ func (l *Loop) emitToolSpanStart(ctx context.Context, start time.Time, toolName,
 		return uuid.Nil
 	}
 
-	previewLimit := 500
-	if collector.Verbose() {
-		previewLimit = 100000
-	}
+	previewLimit := previewLimitForVerbose(collector.Verbose())
 
 	spanID := store.GenNewID()
 	span := store.SpanData{
@@ -183,7 +194,7 @@ func (l *Loop) emitToolSpanStart(ctx context.Context, start time.Time, toolName,
 		StartTime:    start,
 		ToolName:     toolName,
 		ToolCallID:   toolCallID,
-		InputPreview: truncateStr(input, previewLimit),
+		InputPreview: tracing.TruncateJSON(input, previewLimit),
 		Status:       store.SpanStatusRunning,
 		Level:        store.SpanLevelDefault,
 		CreatedAt:    start,
@@ -195,6 +206,10 @@ func (l *Loop) emitToolSpanStart(ctx context.Context, start time.Time, toolName,
 		span.AgentID = &l.agentUUID
 	}
 	span.TeamID = tracing.TraceTeamIDPtrFromContext(ctx)
+	span.TenantID = store.TenantIDFromContext(ctx)
+	if span.TenantID == uuid.Nil {
+		span.TenantID = store.MasterTenantID
+	}
 
 	collector.EmitSpan(span)
 	return spanID
@@ -214,16 +229,13 @@ func (l *Loop) emitToolSpanEnd(ctx context.Context, spanID uuid.UUID, start time
 	}
 
 	now := time.Now().UTC()
-	previewLimit := 500
-	if collector.Verbose() {
-		previewLimit = 100000
-	}
+	previewLimit := previewLimitForVerbose(collector.Verbose())
 
 	updates := map[string]any{
 		"end_time":       now,
 		"duration_ms":    int(now.Sub(start).Milliseconds()),
 		"status":         store.SpanStatusCompleted,
-		"output_preview": truncateStr(result.ForLLM, previewLimit),
+		"output_preview": tracing.TruncateMid(result.ForLLM, previewLimit),
 	}
 
 	if result.IsError {
@@ -274,10 +286,7 @@ func (l *Loop) emitAgentSpanStart(ctx context.Context, agentSpanID uuid.UUID, st
 		return
 	}
 
-	previewLimit := 500
-	if collector.Verbose() {
-		previewLimit = 100000
-	}
+	previewLimit := previewLimitForVerbose(collector.Verbose())
 
 	spanName := l.id
 	span := store.SpanData{
@@ -290,7 +299,7 @@ func (l *Loop) emitAgentSpanStart(ctx context.Context, agentSpanID uuid.UUID, st
 		Level:        store.SpanLevelDefault,
 		Model:        l.model,
 		Provider:     l.provider.Name(),
-		InputPreview: truncateStr(inputPreview, previewLimit),
+		InputPreview: tracing.TruncateMid(inputPreview, previewLimit),
 		CreatedAt:    start,
 	}
 	// Nest under parent root span if this is an announce run.
@@ -302,6 +311,10 @@ func (l *Loop) emitAgentSpanStart(ctx context.Context, agentSpanID uuid.UUID, st
 		span.AgentID = &l.agentUUID
 	}
 	span.TeamID = tracing.TraceTeamIDPtrFromContext(ctx)
+	span.TenantID = store.TenantIDFromContext(ctx)
+	if span.TenantID == uuid.Nil {
+		span.TenantID = store.MasterTenantID
+	}
 
 	collector.EmitSpan(span)
 }
@@ -329,11 +342,8 @@ func (l *Loop) emitAgentSpanEnd(ctx context.Context, agentSpanID uuid.UUID, star
 		updates["status"] = store.SpanStatusError
 		updates["error"] = runErr.Error()
 	} else if result != nil {
-		limit := 500
-		if collector.Verbose() {
-			limit = 100000
-		}
-		updates["output_preview"] = truncateStr(result.Content, limit)
+		limit := previewLimitForVerbose(collector.Verbose())
+		updates["output_preview"] = tracing.TruncateMid(result.Content, limit)
 		// Note: token counts are NOT set on agent spans to avoid double-counting
 		// with child llm_call spans. Trace aggregation sums only llm_call spans.
 	}
@@ -341,24 +351,68 @@ func (l *Loop) emitAgentSpanEnd(ctx context.Context, agentSpanID uuid.UUID, star
 	collector.EmitSpanUpdate(agentSpanID, traceID, updates)
 }
 
+// previewLimitForVerbose returns the preview character limit based on verbose mode.
+func previewLimitForVerbose(verbose bool) int {
+	if verbose {
+		return 200_000
+	}
+	return 40_000
+}
+
 func truncateStr(s string, maxLen int) string {
 	s = strings.ToValidUTF8(s, "")
 	if len(s) <= maxLen {
 		return s
 	}
+	// Keep the tail — recent context is more useful for debugging.
+	start := len(s) - maxLen
 	// Don't cut in the middle of a multi-byte rune
-	for maxLen > 0 && !utf8.RuneStart(s[maxLen]) {
-		maxLen--
+	for start < len(s) && !utf8.RuneStart(s[start]) {
+		start++
 	}
-	return s[:maxLen] + "..."
+	return "..." + s[start:]
+}
+
+// estimateMessageTokens returns a rough token estimate for a single message,
+// including content text and tool call arguments.
+func estimateMessageTokens(m providers.Message) int {
+	tokens := utf8.RuneCountInString(m.Content) / 3
+	for _, tc := range m.ToolCalls {
+		tokens += len(tc.ID)/3 + len(tc.Name)/3
+		for k, v := range tc.Arguments {
+			tokens += len(k) / 3
+			switch val := v.(type) {
+			case string:
+				tokens += len(val) / 3
+			default:
+				tokens += 10 // small fixed estimate for non-string args (numbers, booleans, etc.)
+			}
+		}
+	}
+	return tokens
 }
 
 // EstimateTokens returns a rough token estimate for a slice of messages.
+// Includes content text and tool call arguments (JSON overhead).
 // Used internally for summarization thresholds and externally for adaptive throttle.
 func EstimateTokens(messages []providers.Message) int {
 	total := 0
 	for _, m := range messages {
-		total += utf8.RuneCountInString(m.Content) / 3
+		total += estimateMessageTokens(m)
+	}
+	return total
+}
+
+// EstimateHistoryTokens estimates tokens for history messages only,
+// excluding system messages (which are overhead: system prompt, tool defs, context files).
+// Used for compaction threshold checks where we need history-only token count.
+func EstimateHistoryTokens(messages []providers.Message) int {
+	total := 0
+	for _, m := range messages {
+		if m.Role == "system" {
+			continue
+		}
+		total += estimateMessageTokens(m)
 	}
 	return total
 }
@@ -382,7 +436,7 @@ func EstimateTokensWithCalibration(messages []providers.Message, lastPromptToken
 	// Estimate only the new messages with the heuristic and add to base.
 	delta := 0
 	for _, m := range messages[lastMsgCount:] {
-		delta += utf8.RuneCountInString(m.Content) / 3
+		delta += estimateMessageTokens(m)
 	}
 	return lastPromptTokens + delta
 }

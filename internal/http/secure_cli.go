@@ -20,13 +20,12 @@ import (
 // SecureCLIHandler handles secure CLI binary credential CRUD endpoints.
 type SecureCLIHandler struct {
 	store  store.SecureCLIStore
-	token  string
 	msgBus *bus.MessageBus
 }
 
 // NewSecureCLIHandler creates a handler for secure CLI credential management.
-func NewSecureCLIHandler(s store.SecureCLIStore, token string, msgBus *bus.MessageBus) *SecureCLIHandler {
-	return &SecureCLIHandler{store: s, token: token, msgBus: msgBus}
+func NewSecureCLIHandler(s store.SecureCLIStore, msgBus *bus.MessageBus) *SecureCLIHandler {
+	return &SecureCLIHandler{store: s, msgBus: msgBus}
 }
 
 // RegisterRoutes registers all secure CLI routes on the given mux.
@@ -38,10 +37,16 @@ func (h *SecureCLIHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /v1/cli-credentials/{id}", h.auth(h.handleUpdate))
 	mux.HandleFunc("DELETE /v1/cli-credentials/{id}", h.auth(h.handleDelete))
 	mux.HandleFunc("POST /v1/cli-credentials/{id}/test", h.auth(h.handleDryRun))
+
+	// Per-user credential management
+	mux.HandleFunc("GET /v1/cli-credentials/{id}/user-credentials", h.auth(h.handleListUserCredentials))
+	mux.HandleFunc("GET /v1/cli-credentials/{id}/user-credentials/{userId}", h.auth(h.handleGetUserCredentials))
+	mux.HandleFunc("PUT /v1/cli-credentials/{id}/user-credentials/{userId}", h.auth(h.handleSetUserCredentials))
+	mux.HandleFunc("DELETE /v1/cli-credentials/{id}/user-credentials/{userId}", h.auth(h.handleDeleteUserCredentials))
 }
 
 func (h *SecureCLIHandler) auth(next http.HandlerFunc) http.HandlerFunc {
-	return requireAuth(h.token, permissions.RoleAdmin, next)
+	return requireAuth(permissions.RoleAdmin, next)
 }
 
 func (h *SecureCLIHandler) emitCacheInvalidate(key string) {

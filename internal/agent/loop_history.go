@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -13,10 +13,20 @@ import (
 	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/edition"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
+	"github.com/nextlevelbuilder/goclaw/internal/safego"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
+
+// teamGuidance returns edition-specific system prompt guidance for team members.
+func teamGuidance(fullMode bool) string {
+	if fullMode {
+		return tools.FullTeamPolicy{}.MemberGuidance()
+	}
+	return tools.LiteTeamPolicy{}.MemberGuidance()
+}
 
 // filteredToolNames returns tool names after applying policy filters.
 // Used for system prompt so denied tools don't appear in ## Tooling section.
@@ -30,6 +40,29 @@ func (l *Loop) filteredToolNames() []string {
 		names[i] = d.Function.Name
 	}
 	return names
+}
+
+// filteredToolNamesForChannel returns tool names after applying both policy
+// and ChannelAware filters. Tools that implement ChannelAware and don't list
+// the current channelType are excluded — keeps the system prompt Tooling
+// section consistent with the actual tool definitions sent to the LLM.
+func (l *Loop) filteredToolNamesForChannel(channelType string) []string {
+	names := l.filteredToolNames()
+	if channelType == "" {
+		return names
+	}
+	filtered := names[:0:0]
+	for _, name := range names {
+		if tool, ok := l.tools.Get(name); ok {
+			if ca, ok := tool.(tools.ChannelAware); ok {
+				if !slices.Contains(ca.RequiredChannelTypes(), channelType) {
+					continue
+				}
+			}
+		}
+		filtered = append(filtered, name)
+	}
+	return filtered
 }
 
 // buildCredentialCLIContext generates the TOOLS.md supplement for credentialed CLIs.
@@ -66,7 +99,7 @@ func (l *Loop) buildMCPToolDescs(toolNames []string) map[string]string {
 // buildMessages constructs the full message list for an LLM request.
 // Returns the messages and whether BOOTSTRAP.md was present in context files
 // (used by the caller for auto-cleanup without an extra DB roundtrip).
-func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, summary, userMessage, extraSystemPrompt, sessionKey, channel, channelType, peerKind, userID string, historyLimit int, skillFilter []string, lightContext bool) ([]providers.Message, bool) {
+func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, summary, userMessage, extraSystemPrompt, sessionKey, channel, channelType, chatTitle, peerKind, userID string, historyLimit int, skillFilter []string, lightContext bool) ([]providers.Message, bool) {
 	var messages []providers.Message
 
 	// Build full system prompt using the new builder (matching TS buildAgentSystemPrompt)
@@ -83,18 +116,20 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 	_, hasKG := l.tools.Get("knowledge_graph_search")
 
 	// Per-user workspace: show the user's subdirectory in the system prompt.
-	// Uses cached workspace from user_agent_profiles (includes channel isolation).
+	// Uses cached workspace from userSetups (includes channel isolation).
 	// When workspace sharing is enabled, show the base workspace without user subfolder.
 	promptWorkspace := l.workspace
 	if l.agentUUID != uuid.Nil && userID != "" && l.workspace != "" {
-		if cachedWs, ok := l.userWorkspaces.Load(userID); ok {
-			promptWorkspace = cachedWs.(string)
-			if !l.shouldShareWorkspace(userID, peerKind) {
-				promptWorkspace = filepath.Join(promptWorkspace, sanitizePathSegment(userID))
+		shared := l.shouldShareWorkspace(userID, peerKind)
+		baseWs := l.workspace
+		if val, ok := l.userSetups.Load(userID); ok {
+			if ws := val.(*userSetup).workspace; ws != "" {
+				baseWs = ws
 			}
-		} else if !l.shouldShareWorkspace(userID, peerKind) {
-			promptWorkspace = filepath.Join(l.workspace, sanitizePathSegment(userID))
 		}
+		promptWorkspace = tools.ResolveWorkspace(baseWs,
+			tools.UserChatLayer(tools.SanitizePathSegment(userID), shared),
+		)
 	}
 
 	// Resolve context files once — also detect BOOTSTRAP.md presence.
@@ -102,6 +137,17 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 	var contextFiles []bootstrap.ContextFile
 	if !lightContext {
 		contextFiles = l.resolveContextFiles(ctx, userID)
+
+		// Fallback: if DB seeding failed (e.g. SQLITE_BUSY) but we have
+		// in-memory embedded templates, merge them so the first turn still
+		// gets bootstrap onboarding. Only applies when DB returned no user files.
+		if val, ok := l.userSetups.Load(userID); ok {
+			if fb := val.(*userSetup).fallbackBootstrap; len(fb) > 0 {
+				contextFiles = l.mergeContextFallback(contextFiles, fb)
+				// Clear after first use — next turn should read from DB.
+				val.(*userSetup).fallbackBootstrap = nil
+			}
+		}
 	}
 	hadBootstrap := false
 	for _, cf := range contextFiles {
@@ -111,10 +157,15 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		}
 	}
 
-	// Bootstrap mode: group chats and team-dispatched sessions skip onboarding entirely;
-	// only DMs enter minimal bootstrap mode.
-	if hadBootstrap && (peerKind == "group" || bootstrap.IsTeamSession(sessionKey)) {
-		// Filter BOOTSTRAP.md from context files — groups/team tasks don't need onboarding.
+	// Bootstrap mode: only direct user DMs need onboarding.
+	// System sessions (group, team, subagent, cron, heartbeat) skip bootstrap
+	// to prevent the model from getting distracted by onboarding instructions.
+	isSystemSession := peerKind == "group" ||
+		bootstrap.IsTeamSession(sessionKey) ||
+		bootstrap.IsSubagentSession(sessionKey) ||
+		bootstrap.IsCronSession(sessionKey) ||
+		bootstrap.IsHeartbeatSession(sessionKey)
+	if hadBootstrap && isSystemSession {
 		filtered := make([]bootstrap.ContextFile, 0, len(contextFiles))
 		for _, cf := range contextFiles {
 			if cf.Path != bootstrap.BootstrapFile {
@@ -139,7 +190,9 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 	}
 
 	// Build tool list, filtering out skill_manage when skill_evolve is off.
-	toolNames := l.filteredToolNames()
+	// Also applies ChannelAware filtering so channel-specific tools don't
+	// appear in ## Tooling when the current channel doesn't support them.
+	toolNames := l.filteredToolNamesForChannel(channelType)
 	if !l.skillEvolve {
 		filtered := toolNames[:0:0]
 		for _, n := range toolNames {
@@ -175,16 +228,18 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		Workspace:              promptWorkspace,
 		Channel:                channel,
 		ChannelType:            channelType,
+		ChatTitle:              chatTitle,
 		PeerKind:               peerKind,
 		OwnerIDs:               l.ownerIDs,
 		Mode:                   mode,
 		ToolNames:              toolNames,
-		SkillsSummary:          l.resolveSkillsSummary(skillFilter),
+		SkillsSummary:          l.resolveSkillsSummary(ctx, skillFilter),
 		HasMemory:              l.hasMemory,
 		HasSpawn:               l.tools != nil && hasSpawn,
 		HasTeam:                hasTeamTools,
 		TeamWorkspace:          tools.ToolTeamWorkspaceFromCtx(ctx),
 		TeamMembers:            teamMembers,
+		TeamGuidance:           teamGuidance(edition.Current().TeamFullMode),
 		HasSkillSearch:         hasSkillSearch,
 		HasSkillManage:         l.skillEvolve && hasSkillManage,
 		HasMCPToolSearch:       hasMCPToolSearch,
@@ -231,8 +286,8 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		slog.Info("sanitizeHistory: cleaned session history",
 			"session", sessionKey, "dropped", droppedCount)
 		cleanedHistory, _ := sanitizeHistory(history)
-		l.sessions.SetHistory(sessionKey, cleanedHistory)
-		l.sessions.Save(sessionKey)
+		l.sessions.SetHistory(ctx, sessionKey, cleanedHistory)
+		l.sessions.Save(ctx, sessionKey)
 	}
 
 	// Current user message
@@ -274,6 +329,21 @@ func (l *Loop) resolveContextFiles(ctx context.Context, userID string) []bootstr
 	return merged
 }
 
+// mergeContextFallback adds fallback (in-memory) files into contextFiles,
+// skipping any that already exist. Used when DB seeding failed.
+func (l *Loop) mergeContextFallback(contextFiles, fallback []bootstrap.ContextFile) []bootstrap.ContextFile {
+	existing := make(map[string]struct{}, len(contextFiles))
+	for _, f := range contextFiles {
+		existing[f.Path] = struct{}{}
+	}
+	for _, fb := range fallback {
+		if _, ok := existing[fb.Path]; !ok {
+			contextFiles = append(contextFiles, fb)
+		}
+	}
+	return contextFiles
+}
+
 // bootstrapToolAllowlist is the set of tools available during bootstrap onboarding.
 // Only write_file (and its alias Write) are needed to save USER.md and clear BOOTSTRAP.md.
 var bootstrapToolAllowlist = map[string]bool{
@@ -305,7 +375,7 @@ const (
 // Returns (summary XML, useInline) — useInline=true means skills are inlined and
 // the system prompt should use TS-style "scan <available_skills>" instructions
 // instead of "use skill_search".
-func (l *Loop) resolveSkillsSummary(skillFilter []string) string {
+func (l *Loop) resolveSkillsSummary(ctx context.Context, skillFilter []string) string {
 	if l.skillsLoader == nil {
 		return ""
 	}
@@ -316,7 +386,7 @@ func (l *Loop) resolveSkillsSummary(skillFilter []string) string {
 		allowList = skillFilter
 	}
 
-	filtered := l.skillsLoader.FilterSkills(allowList)
+	filtered := l.skillsLoader.FilterSkills(ctx, allowList)
 	if len(filtered) == 0 {
 		return ""
 	}
@@ -330,7 +400,7 @@ func (l *Loop) resolveSkillsSummary(skillFilter []string) string {
 
 	if len(filtered) <= skillInlineMaxCount && estimatedTokens <= skillInlineMaxTokens {
 		// Inline mode: build full XML summary
-		return l.skillsLoader.BuildSummary(allowList)
+		return l.skillsLoader.BuildSummary(ctx, allowList)
 	}
 
 	// Search mode: no XML in prompt, agent uses skill_search tool
@@ -471,24 +541,24 @@ func sanitizeHistory(msgs []providers.Message) ([]providers.Message, int) {
 }
 
 func (l *Loop) maybeSummarize(ctx context.Context, sessionKey string) {
-	history := l.sessions.GetHistory(sessionKey)
+	history := l.sessions.GetHistory(ctx, sessionKey)
 
-	// Use calibrated token estimation when available.
-	lastPT, lastMC := l.sessions.GetLastPromptTokens(sessionKey)
-	tokenEstimate := EstimateTokensWithCalibration(history, lastPT, lastMC)
+	// Use calibrated token estimation, adjusted for overhead.
+	// lastPromptTokens includes everything (system prompt, tools, context files, history).
+	// We subtract estimated overhead so the threshold comparison is history-only.
+	lastPT, lastMC := l.sessions.GetLastPromptTokens(ctx, sessionKey)
+	adjustedLastPT := max(lastPT-l.estimateOverhead(history, lastPT, lastMC), 0)
+	tokenEstimate := EstimateTokensWithCalibration(history, adjustedLastPT, lastMC)
 
-	// Resolve compaction thresholds from config with sensible defaults.
+	// Resolve compaction threshold from config: token-only (no message count guard).
+	// Industry standard — Claude Code, Anthropic API, LangChain all use token-based thresholds.
 	historyShare := config.DefaultHistoryShare
 	if l.compactionCfg != nil && l.compactionCfg.MaxHistoryShare > 0 {
 		historyShare = l.compactionCfg.MaxHistoryShare
 	}
-	minMessages := 200
-	if l.compactionCfg != nil && l.compactionCfg.MinMessages > 0 {
-		minMessages = l.compactionCfg.MinMessages
-	}
 
 	threshold := int(float64(l.contextWindow) * historyShare)
-	if len(history) <= minMessages && tokenEstimate <= threshold {
+	if tokenEstimate <= threshold {
 		return
 	}
 
@@ -505,7 +575,7 @@ func (l *Loop) maybeSummarize(ctx context.Context, sessionKey string) {
 	// Memory flush runs synchronously INSIDE the guard
 	// (so concurrent runs don't both trigger flush for the same compaction cycle).
 	flushSettings := ResolveMemoryFlushSettings(l.compactionCfg)
-	if l.shouldRunMemoryFlush(sessionKey, tokenEstimate, flushSettings) {
+	if l.shouldRunMemoryFlush(ctx, sessionKey, tokenEstimate, flushSettings) {
 		l.runMemoryFlush(ctx, sessionKey, flushSettings)
 	}
 
@@ -518,18 +588,19 @@ func (l *Loop) maybeSummarize(ctx context.Context, sessionKey string) {
 	// Summarize in background (holds the per-session lock until done)
 	go func() {
 		defer sessionMu.Unlock()
+		defer safego.Recover(nil, "session", sessionKey)
 
 		// Re-check: history may have been truncated by a concurrent summarize
 		// that finished between our threshold check and acquiring the lock.
-		history := l.sessions.GetHistory(sessionKey)
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 120*time.Second)
+		defer cancel()
+
+		history := l.sessions.GetHistory(sctx, sessionKey)
 		if len(history) <= keepLast {
 			return
 		}
 
-		sctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-		defer cancel()
-
-		summary := l.sessions.GetSummary(sessionKey)
+		summary := l.sessions.GetSummary(sctx, sessionKey)
 		toSummarize := history[:len(history)-keepLast]
 
 		var sb strings.Builder
@@ -579,11 +650,33 @@ func (l *Loop) maybeSummarize(ctx context.Context, sessionKey string) {
 			return
 		}
 
-		l.sessions.SetSummary(sessionKey, SanitizeAssistantContent(resp.Content))
-		l.sessions.TruncateHistory(sessionKey, keepLast)
-		l.sessions.IncrementCompaction(sessionKey)
-		l.sessions.Save(sessionKey)
+		l.sessions.SetSummary(sctx, sessionKey, SanitizeAssistantContent(resp.Content))
+		l.sessions.TruncateHistory(sctx, sessionKey, keepLast)
+		l.sessions.IncrementCompaction(sctx, sessionKey)
+		l.sessions.Save(sctx, sessionKey)
 	}()
+}
+
+// estimateOverhead derives the non-history token overhead (system prompt + tool definitions +
+// context files) from calibration data. Used by maybeSummarize to compare history-only tokens
+// against the compaction threshold.
+func (l *Loop) estimateOverhead(history []providers.Message, lastPromptTokens, lastMsgCount int) int {
+	if lastPromptTokens <= 0 || lastMsgCount <= 0 {
+		// No calibration data — use conservative default (20% of context, capped at 40k).
+		fallback := min(int(float64(l.contextWindow)*0.2), 40000)
+		return fallback
+	}
+
+	// Overhead = total prompt tokens - estimated history tokens at calibration time.
+	count := min(lastMsgCount, len(history))
+	historyEstAtCalibration := EstimateHistoryTokens(history[:count])
+	overhead := max(lastPromptTokens-historyEstAtCalibration, 0)
+	// Clamp: overhead shouldn't exceed 40% of context window.
+	maxOverhead := int(float64(l.contextWindow) * 0.4)
+	if overhead > maxOverhead {
+		overhead = maxOverhead
+	}
+	return overhead
 }
 
 // buildGroupWriterPrompt builds the system prompt section for group file writer restrictions.

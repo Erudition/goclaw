@@ -29,7 +29,6 @@ export function ChannelDetailPage({ instanceId, onBack, onDelete }: ChannelDetai
     listManagers,
     addManager,
     removeManager,
-    listContacts,
   } = useChannelDetail(instanceId);
   const { agents } = useAgents();
   const { channels } = useChannels();
@@ -107,7 +106,6 @@ export function ChannelDetailPage({ instanceId, onBack, onDelete }: ChannelDetai
                 listManagers={listManagers}
                 addManager={addManager}
                 removeManager={removeManager}
-                listContacts={listContacts}
               />
             </TabsContent>
           </Tabs>

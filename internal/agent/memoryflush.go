@@ -67,7 +67,7 @@ func ResolveMemoryFlushSettings(compaction *config.CompactionConfig) *MemoryFlus
 // shouldRunMemoryFlush checks whether a memory flush should run before compaction.
 // Flush always runs when compaction triggers (called inside maybeSummarize),
 // gated only by enabled/memory checks and a dedup guard per compaction cycle.
-func (l *Loop) shouldRunMemoryFlush(sessionKey string, totalTokens int, settings *MemoryFlushSettings) bool {
+func (l *Loop) shouldRunMemoryFlush(ctx context.Context, sessionKey string, totalTokens int, settings *MemoryFlushSettings) bool {
 	if settings == nil || !settings.Enabled || !l.hasMemory {
 		return false
 	}
@@ -77,8 +77,8 @@ func (l *Loop) shouldRunMemoryFlush(sessionKey string, totalTokens int, settings
 	}
 
 	// Deduplication: skip if already flushed in this compaction cycle.
-	compactionCount := l.sessions.GetCompactionCount(sessionKey)
-	lastFlushAt := l.sessions.GetMemoryFlushCompactionCount(sessionKey)
+	compactionCount := l.sessions.GetCompactionCount(ctx, sessionKey)
+	lastFlushAt := l.sessions.GetMemoryFlushCompactionCount(ctx, sessionKey)
 	if lastFlushAt >= 0 && lastFlushAt == compactionCount {
 		return false
 	}
@@ -95,8 +95,8 @@ func (l *Loop) runMemoryFlush(ctx context.Context, sessionKey string, settings *
 	defer cancel()
 
 	// Build messages: system prompt + history summary + flush prompt
-	history := l.sessions.GetHistory(sessionKey)
-	summary := l.sessions.GetSummary(sessionKey)
+	history := l.sessions.GetHistory(ctx, sessionKey)
+	summary := l.sessions.GetSummary(ctx, sessionKey)
 
 	var messages []providers.Message
 
@@ -203,8 +203,8 @@ func (l *Loop) runMemoryFlush(ctx context.Context, sessionKey string, settings *
 	}
 
 	// Mark flush as done
-	l.sessions.SetMemoryFlushDone(sessionKey)
-	l.sessions.Save(sessionKey)
+	l.sessions.SetMemoryFlushDone(ctx, sessionKey)
+	l.sessions.Save(ctx, sessionKey)
 
 	slog.Info("memory flush: completed", "session", sessionKey)
 }

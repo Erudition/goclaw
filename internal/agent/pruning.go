@@ -99,7 +99,8 @@ func resolvePruningSettings(cfg *config.ContextPruningConfig) *effectivePruningS
 // Only tool results older than keepLastAssistants are eligible for pruning.
 // Returns a new slice if any changes were made, otherwise the original.
 func pruneContextMessages(msgs []providers.Message, contextWindowTokens int, cfg *config.ContextPruningConfig) []providers.Message {
-	if cfg == nil || cfg.Mode != "cache-ttl" {
+	// Pruning runs by default for all providers. Only skip when explicitly disabled.
+	if cfg != nil && cfg.Mode == "off" {
 		return msgs
 	}
 	if contextWindowTokens <= 0 || len(msgs) == 0 {
