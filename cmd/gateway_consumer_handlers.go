@@ -2,11 +2,12 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -85,91 +86,60 @@ func handleSubagentAnnounce(
 		announceUserID = fmt.Sprintf("group:%s:%s", origChannel, msg.ChatID)
 	}
 
-	// Build outbound metadata for topic/thread routing.
-	outMeta := buildAnnounceOutMeta(origLocalKey)
+	// Build announce entry from raw metadata (avoids double-formatting).
+	runtimeMs, _ := strconv.ParseInt(msg.Metadata[tools.MetaSubagentRuntime], 10, 64)
+	iterations, _ := strconv.Atoi(msg.Metadata[tools.MetaSubagentIterations])
+	inputToks, _ := strconv.ParseInt(msg.Metadata[tools.MetaSubagentInputToks], 10, 64)
+	outputToks, _ := strconv.ParseInt(msg.Metadata[tools.MetaSubagentOutputToks], 10, 64)
 
-	// Build request before goroutine to capture msg fields.
-	// WS channel has no outbound handler — media converted to markdown URLs
-	// and appended to the assistant response via ContentSuffix, which the
-	// agent loop applies BEFORE saving to session and emitting run.completed.
-	fwdMedia := msg.Media
-	contentSuffix := ""
-	if origChannel == "ws" && len(msg.Media) > 0 {
-		contentSuffix = mediaToMarkdownFromPaths(msg.Media, deps.Cfg)
-		fwdMedia = nil // WS: images delivered via ContentSuffix, not ForwardMedia
+	// Use raw result from metadata if available; fall back to formatted Content for backward compat.
+	rawResult := msg.Metadata[tools.MetaSubagentResult]
+	if rawResult == "" {
+		rawResult = msg.Content
 	}
 
-	announceReq := agent.RunRequest{
+	entry := subagentAnnounceEntry{
+		Label:        msg.Metadata[tools.MetaSubagentLabel],
+		Status:       msg.Metadata[tools.MetaSubagentStatus],
+		Content:      rawResult,
+		Media:        msg.Media,
+		InputTokens:  inputToks,
+		OutputTokens: outputToks,
+		Runtime:      time.Duration(runtimeMs) * time.Millisecond,
+		Iterations:   iterations,
+	}
+
+	queueKey := fmt.Sprintf("%s:%s", msg.TenantID, sessionKey)
+	routing := subagentAnnounceRouting{
+		QueueKey:         queueKey,
 		SessionKey:       sessionKey,
-		Message:          msg.Content,
-		ForwardMedia:     fwdMedia,
-		ContentSuffix:    contentSuffix,
-		Channel:          origChannel,
-		ChannelType:      origChannelType,
-		ChatID:           msg.ChatID,
-		PeerKind:         origPeerKind,
-		LocalKey:         origLocalKey,
+		TenantID:         msg.TenantID,
+		OrigChannel:      origChannel,
+		OrigChannelType:  origChannelType,
+		OrigChatID:       msg.ChatID,
+		OrigPeerKind:     origPeerKind,
+		OrigLocalKey:     origLocalKey,
 		UserID:           announceUserID,
-		RunID:            fmt.Sprintf("announce-%s", msg.SenderID),
-		RunKind:          "announce",
-		HideInput:        true, // don't persist raw system message in chat history
-		Stream:           false,
+		ParentAgent:      parentAgent,
 		ParentTraceID:    parentTraceID,
 		ParentRootSpanID: parentRootSpanID,
+		OutMeta:          buildAnnounceOutMeta(origLocalKey),
 	}
-	// Handle announce asynchronously with per-session serialization.
-	// The mutex ensures concurrent announces for the same session wait for
-	// each other, so each reads up-to-date session history.
-	deps.BgWg.Add(1)
-	go func(sessionKey, origCh, chatID, senderID, label string, meta map[string]string, req agent.RunRequest) {
-		defer deps.BgWg.Done()
-		defer safego.Recover(nil, "component", "subagent_announce", "session", sessionKey)
-		mu := deps.GetAnnounceMu(sessionKey)
-		mu.Lock()
-		defer mu.Unlock()
 
-		outCh := deps.Sched.Schedule(ctx, scheduler.LaneSubagent, req)
-		outcome := <-outCh
-		if outcome.Err != nil {
-			if errors.Is(outcome.Err, context.Canceled) {
-				slog.Info("subagent announce: run cancelled", "subagent", senderID)
-				return
-			}
-			slog.Error("subagent announce: agent run failed", "error", outcome.Err)
-			deps.MsgBus.PublishOutbound(bus.OutboundMessage{
-				Channel:  origCh,
-				ChatID:   chatID,
-				Content:  formatAgentError(outcome.Err),
-				Metadata: meta,
-			})
-			return
-		}
+	// Enqueue into producer-consumer queue using tenant-scoped key from routing.
+	q, isProcessor := enqueueSubagentAnnounce(queueKey, entry)
+	if isProcessor {
+		deps.BgWg.Add(1)
+		go func() {
+			defer deps.BgWg.Done()
+			defer safego.Recover(nil, "component", "subagent_announce_loop", "session", sessionKey)
 
-		// Suppress empty/NO_REPLY (matching TS normalize-reply.ts / tokens.ts).
-		isSilent := outcome.Result.Content == "" || agent.IsSilentReply(outcome.Result.Content)
-		if isSilent && len(outcome.Result.Media) == 0 {
-			slog.Info("subagent announce: suppressed silent/empty reply",
-				"subagent", senderID,
-				"label", label,
-			)
-			return
-		}
+			// Fetch live roster for merged announce context.
+			roster := deps.SubagentMgr.RosterForParent(parentAgent)
 
-		// Deliver agent's reformulated response to origin channel.
-		announceContent := outcome.Result.Content
-		if isSilent {
-			announceContent = "" // suppress NO_REPLY text but still send media
-		}
-
-		outMsg := bus.OutboundMessage{
-			Channel:  origCh,
-			ChatID:   chatID,
-			Content:  announceContent,
-			Metadata: meta,
-		}
-		appendMediaToOutbound(&outMsg, outcome.Result.Media)
-		deps.MsgBus.PublishOutbound(outMsg)
-	}(sessionKey, origChannel, msg.ChatID, msg.SenderID, msg.Metadata[tools.MetaSubagentLabel], outMeta, announceReq)
+			processSubagentAnnounceLoop(ctx, q, routing, roster, deps.SubagentMgr, deps.Sched, deps.MsgBus, deps.Cfg)
+		}()
+	}
 
 	return true
 }

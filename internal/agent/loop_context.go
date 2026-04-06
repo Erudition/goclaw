@@ -172,9 +172,8 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 				slog.Warn("failed to create team workspace directory", "workspace", wsDir, "error", err)
 			}
 			ctx = tools.WithToolTeamWorkspace(ctx, wsDir)
-			if team.LeadAgentID == l.agentUUID {
-				ctx = tools.WithToolWorkspace(ctx, wsDir)
-			}
+			// Leader keeps personal workspace (set at line 110-132) as default.
+			// Team workspace accessible via ToolTeamWorkspaceFromCtx for delegation.
 			if req.TeamID == "" {
 				ctx = tools.WithToolTeamID(ctx, team.ID.String())
 			}

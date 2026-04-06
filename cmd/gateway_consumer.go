@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -25,7 +26,7 @@ import (
 // and routes them through the scheduler/agent loop, then publishes the response back.
 // Also handles subagent announcements: routes them through the parent agent's session
 // (matching TS subagent-announce.ts pattern) so the agent can reformulate for the user.
-func consumeInboundMessages(ctx context.Context, msgBus *bus.MessageBus, agents *agent.Router, cfg *config.Config, sched *scheduler.Scheduler, channelMgr *channels.Manager, teamStore store.TeamStore, quotaChecker *channels.QuotaChecker, sessStore store.SessionStore, agentStore store.AgentStore, contactCollector *store.ContactCollector, postTurn tools.PostTurnProcessor) {
+func consumeInboundMessages(ctx context.Context, msgBus *bus.MessageBus, agents *agent.Router, cfg *config.Config, sched *scheduler.Scheduler, channelMgr *channels.Manager, teamStore store.TeamStore, quotaChecker *channels.QuotaChecker, sessStore store.SessionStore, agentStore store.AgentStore, contactCollector *store.ContactCollector, postTurn tools.PostTurnProcessor, subagentMgr *tools.SubagentManager) {
 	slog.Info("inbound message consumer started")
 
 	// Inbound message deduplication (matching TS src/infra/dedupe.ts + inbound-dedupe.ts).
@@ -56,6 +57,7 @@ func consumeInboundMessages(ctx context.Context, msgBus *bus.MessageBus, agents 
 		PostTurn:         postTurn,
 		QuotaChecker:     quotaChecker,
 		ContactCollector: contactCollector,
+		SubagentMgr:      subagentMgr,
 		GetAnnounceMu:    getAnnounceMu,
 	}
 
@@ -211,8 +213,14 @@ func truncateForReminder(content string, maxLen int) string {
 	// Use last non-empty line as it's typically the most relevant.
 	lines := strings.Split(strings.TrimSpace(content), "\n")
 	msg := lines[len(lines)-1]
-	if len(msg) > maxLen {
-		msg = msg[:maxLen] + "..."
+	// Ensure we only persist valid UTF-8 into PostgreSQL.
+	msg = strings.ToValidUTF8(msg, "")
+	if maxLen <= 0 {
+		return msg
+	}
+	if utf8.RuneCountInString(msg) > maxLen {
+		r := []rune(msg)
+		msg = string(r[:maxLen]) + "..."
 	}
 	return msg
 }

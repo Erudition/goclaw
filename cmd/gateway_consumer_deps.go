@@ -27,6 +27,7 @@ type ConsumerDeps struct {
 	QuotaChecker     *channels.QuotaChecker
 	ContactCollector *store.ContactCollector
 	TaskRunSessions  sync.Map
+	SubagentMgr      *tools.SubagentManager
 	BgWg             sync.WaitGroup
 	GetAnnounceMu    func(string) *sync.Mutex
 }

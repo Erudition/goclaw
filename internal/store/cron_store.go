@@ -237,17 +237,14 @@ func MergeCronSchedule(current CronSchedule, patch *CronSchedule) CronSchedule {
 	}
 
 	merged := CronSchedule{Kind: newKind}
+	// TZ: always use patch value for all schedule kinds. Empty = UTC (default).
+	merged.TZ = patch.TZ
 	switch newKind {
 	case "cron":
 		if patch.Expr != "" {
 			merged.Expr = patch.Expr
 		} else if current.Kind == newKind {
 			merged.Expr = current.Expr
-		}
-		if patch.TZ != "" {
-			merged.TZ = patch.TZ
-		} else if current.Kind == newKind {
-			merged.TZ = current.TZ
 		}
 	case "every":
 		if patch.EveryMS != nil {
@@ -300,25 +297,25 @@ func ValidateCronSchedule(schedule *CronSchedule) error {
 func ApplyCronScheduleUpdates(updates map[string]any, schedule CronSchedule) {
 	updates["schedule_kind"] = schedule.Kind
 
+	// TZ applies to all schedule kinds (used for display and cron evaluation).
+	if schedule.TZ != "" {
+		updates["timezone"] = schedule.TZ
+	} else {
+		updates["timezone"] = nil
+	}
+
 	switch schedule.Kind {
 	case "cron":
 		updates["cron_expression"] = schedule.Expr
-		if schedule.TZ != "" {
-			updates["timezone"] = schedule.TZ
-		} else {
-			updates["timezone"] = nil
-		}
 		updates["interval_ms"] = nil
 		updates["run_at"] = nil
 	case "every":
 		updates["cron_expression"] = nil
-		updates["timezone"] = nil
 		updates["interval_ms"] = *schedule.EveryMS
 		updates["run_at"] = nil
 	case "at":
 		runAt := time.UnixMilli(*schedule.AtMS)
 		updates["cron_expression"] = nil
-		updates["timezone"] = nil
 		updates["interval_ms"] = nil
 		updates["run_at"] = runAt
 	}

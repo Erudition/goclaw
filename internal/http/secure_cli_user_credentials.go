@@ -23,22 +23,25 @@ func (h *SecureCLIHandler) handleListUserCredentials(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, err.Error())})
 		return
 	}
-	// Return without encrypted env for listing (only user_id + timestamps)
+	// Return without env values for listing (names only + timestamps)
 	type entry struct {
 		ID        uuid.UUID `json:"id"`
 		BinaryID  uuid.UUID `json:"binary_id"`
 		UserID    string    `json:"user_id"`
 		HasEnv    bool      `json:"has_env"`
+		EnvKeys   []string  `json:"env_keys,omitempty"`
 		CreatedAt string    `json:"created_at"`
 		UpdatedAt string    `json:"updated_at"`
 	}
 	entries := make([]entry, 0, len(creds))
 	for _, c := range creds {
+		envKeys := envKeysFromDecryptedJSON(c.EncryptedEnv)
 		entries = append(entries, entry{
 			ID:        c.ID,
 			BinaryID:  c.BinaryID,
 			UserID:    c.UserID,
 			HasEnv:    len(c.EncryptedEnv) > 0,
+			EnvKeys:   envKeys,
 			CreatedAt: c.CreatedAt,
 			UpdatedAt: c.UpdatedAt,
 		})
@@ -119,6 +122,7 @@ func (h *SecureCLIHandler) handleSetUserCredentials(w http.ResponseWriter, r *ht
 		return
 	}
 
+	emitAudit(h.msgBus, r, "secure_cli.user_credentials.updated", "secure_cli_user_credentials", binaryID.String()+"/"+userID)
 	h.emitCacheInvalidate("")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -142,6 +146,7 @@ func (h *SecureCLIHandler) handleDeleteUserCredentials(w http.ResponseWriter, r 
 		return
 	}
 
+	emitAudit(h.msgBus, r, "secure_cli.user_credentials.deleted", "secure_cli_user_credentials", binaryID.String()+"/"+userID)
 	h.emitCacheInvalidate("")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

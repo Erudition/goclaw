@@ -33,7 +33,7 @@ func (s *PGCronStore) RunJob(ctx context.Context, jobID string, force bool) (boo
 	if parseErr != nil {
 		return false, "", fmt.Errorf("invalid job id %q: %w", jobID, parseErr)
 	}
-	res, err := s.db.ExecContext(ctx, "UPDATE cron_jobs SET last_status = 'running', next_run_at = NULL, updated_at = $1 WHERE id = $2 AND last_status != 'running'", time.Now(), id)
+	res, err := s.db.ExecContext(ctx, "UPDATE cron_jobs SET last_status = 'running', next_run_at = NULL, updated_at = $1 WHERE id = $2 AND last_status IS DISTINCT FROM 'running'", time.Now(), id)
 	if err != nil {
 		slog.Warn("cron: failed to claim job for forced run", "jobId", jobID, "error", err)
 		return false, "", err
@@ -47,8 +47,10 @@ func (s *PGCronStore) RunJob(ctx context.Context, jobID string, force bool) (boo
 
 	s.emitEvent(store.CronEvent{Action: "running", JobID: job.ID, JobName: job.Name, UserID: job.UserID})
 
-	// Use executeOneJob for proper state updates, run logging, and retry
-	s.executeOneJob(*job, handler)
+	// Run directly without reload — job already loaded and claimed above.
+	// reloadClaimed=false skips loadClaimedJob (which requires enabled=true),
+	// allowing manual runs on disabled jobs.
+	s.executeOneJob(*job, handler, false)
 	s.mu.Lock()
 	s.cacheLoaded = false
 	s.mu.Unlock()

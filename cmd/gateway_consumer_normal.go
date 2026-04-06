@@ -129,13 +129,13 @@ func processNormalMessage(
 		}
 		displayName := sessionMeta["display_name"]
 		username := sessionMeta["username"]
-		deps.ContactCollector.EnsureContact(ctx, channelType, msg.Channel, senderNumericID, userID, displayName, username, peerKind, "user")
+		deps.ContactCollector.EnsureContact(ctx, channelType, msg.Channel, senderNumericID, userID, displayName, username, peerKind, "user", "", "")
 
 		// Also collect group chat as a contact (for group permission management / merge).
 		// Group IDs (e.g., Telegram "-100456") differ from user IDs — no UNIQUE conflict.
 		if peerKind == string(sessions.PeerGroup) && msg.ChatID != "" {
 			groupTitle := msg.Metadata["chat_title"] // Telegram: message.Chat.Title
-			deps.ContactCollector.EnsureContact(ctx, channelType, msg.Channel, msg.ChatID, "", groupTitle, "", "group", "group")
+			deps.ContactCollector.EnsureContact(ctx, channelType, msg.Channel, msg.ChatID, "", groupTitle, "", "group", "group", "", "")
 		}
 	}
 
@@ -249,6 +249,7 @@ func processNormalMessage(
 			"- Messages may include a [Chat messages since your last reply] section with recent group history. Each history line shows \"sender [time]: message\".\n" +
 			"- The current message includes a [From: sender_name] tag identifying who @mentioned you.\n" +
 			"- Keep responses concise and focused; long replies are disruptive in groups.\n" +
+			"- Write like a human. Avoid Markdown tables. Use real line breaks sparingly.\n" +
 			"- Address the group naturally. If the history shows a multi-person conversation, consider the full context before answering."
 	}
 

@@ -143,7 +143,12 @@
       "source": "Source:",
       "properties": "Properties:",
       "relations": "Relations",
-      "traverse": "Traverse (2-hop)",
+      "traverse": "Traverse",
+      "depthOption": "{{depth}}-hop",
+      "tabs": {
+        "table": "Table",
+        "graph": "Graph"
+      },
       "traversing": "Traversing...",
       "loading": "Loading...",
       "noRelations": "No relations found.",

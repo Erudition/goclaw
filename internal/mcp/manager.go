@@ -21,6 +21,7 @@ import (
 
 const (
 	healthCheckInterval  = 30 * time.Second
+	healthFailThreshold  = 3 // consecutive ping failures before marking disconnected
 	initialBackoff       = 2 * time.Second
 	maxBackoff           = 60 * time.Second
 	maxReconnectAttempts = 10
@@ -52,6 +53,7 @@ type serverState struct {
 
 	mu              sync.Mutex
 	reconnAttempts  int
+	healthFailures  int // consecutive ping failures (resets on success)
 	lastErr         string
 }
 
@@ -61,9 +63,10 @@ type serverState struct {
 //   - DB-backed: queries MCPServerStore per agent+user for permission-filtered servers
 //
 // When total MCP tool count exceeds mcpToolInlineMaxCount, the manager
-// enters "search mode": tools are kept in deferredTools instead of the
-// registry, and only mcp_tool_search is registered. Tools are activated
-// on demand via ActivateTools().
+// enters hybrid search mode: the first mcpToolInlineMaxCount tools stay
+// registered inline, while excess tools move to deferredTools and are
+// discovered via mcp_tool_search. Tools are activated on demand via
+// ActivateTools().
 type Manager struct {
 	mu       sync.RWMutex
 	servers  map[string]*serverState
@@ -309,21 +312,28 @@ func (m *Manager) LoadForAgent(ctx context.Context, agentID uuid.UUID, userID st
 	return nil
 }
 
-// maybeEnterSearchMode moves all registered BridgeTools to deferredTools
-// if total count exceeds the inline threshold.
+// maybeEnterSearchMode partially defers MCP tools when total count exceeds
+// the inline threshold. The first mcpToolInlineMaxCount tools stay registered
+// inline; the rest are moved to deferredTools and discovered via mcp_tool_search.
 func (m *Manager) maybeEnterSearchMode() {
 	allNames := m.ToolNames()
 	if len(allNames) <= mcpToolInlineMaxCount {
 		return
 	}
 
+	// Build a set of names to defer (everything beyond the threshold).
+	deferSet := make(map[string]struct{}, len(allNames)-mcpToolInlineMaxCount)
+	for _, name := range allNames[mcpToolInlineMaxCount:] {
+		deferSet[name] = struct{}{}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.deferredTools = make(map[string]*BridgeTool, len(allNames))
+	m.deferredTools = make(map[string]*BridgeTool, len(deferSet))
 	m.activatedTools = make(map[string]struct{})
 
-	// Move all tools to deferred — handle both pool-backed and standalone
+	// Move only excess tools to deferred, keep the rest inline.
 	for serverName := range m.servers {
 		var toolNames []string
 		if _, isPool := m.poolServers[serverName]; isPool {
@@ -332,7 +342,12 @@ func (m *Manager) maybeEnterSearchMode() {
 			toolNames = m.servers[serverName].toolNames
 		}
 
+		var kept []string
 		for _, name := range toolNames {
+			if _, shouldDefer := deferSet[name]; !shouldDefer {
+				kept = append(kept, name)
+				continue
+			}
 			if bt, ok := m.registry.Get(name); ok {
 				if bridge, ok := bt.(*BridgeTool); ok {
 					m.deferredTools[name] = bridge
@@ -341,18 +356,21 @@ func (m *Manager) maybeEnterSearchMode() {
 			}
 		}
 
-		// Clear tool names
+		// Update per-server tool names to only the kept inline tools.
 		if _, isPool := m.poolServers[serverName]; isPool {
-			m.poolToolNames[serverName] = nil
+			m.poolToolNames[serverName] = kept
 		} else {
-			m.servers[serverName].toolNames = nil
+			m.servers[serverName].toolNames = kept
 		}
 	}
 
-	tools.UnregisterToolGroup("mcp")
+	// Update "mcp" group to only the kept inline names.
+	inlineNames := allNames[:mcpToolInlineMaxCount]
+	tools.RegisterToolGroup("mcp", inlineNames)
 	m.searchMode = true
 
 	slog.Info("mcp.search_mode.enabled",
+		"inline_tools", len(inlineNames),
 		"deferred_tools", len(m.deferredTools),
 		"threshold", mcpToolInlineMaxCount)
 }

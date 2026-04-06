@@ -42,7 +42,7 @@ func (t *KnowledgeGraphSearchTool) Parameters() map[string]any {
 			},
 			"entity_type": map[string]any{
 				"type":        "string",
-				"description": "Filter by entity type (person, project, task, event, concept, location, organization)",
+				"description": "Filter by entity type (person, organization, project, product, technology, task, event, document, concept, location)",
 			},
 			"entity_id": map[string]any{
 				"type":        "string",
@@ -50,7 +50,7 @@ func (t *KnowledgeGraphSearchTool) Parameters() map[string]any {
 			},
 			"max_depth": map[string]any{
 				"type":        "number",
-				"description": "Maximum traversal depth (default 2, max 3)",
+				"description": "Maximum traversal depth (default 2, max 5)",
 			},
 		},
 		"required": []string{"query"},
@@ -76,7 +76,7 @@ func (t *KnowledgeGraphSearchTool) Execute(ctx context.Context, args map[string]
 	entityID, _ := args["entity_id"].(string)
 	maxDepth := 2
 	if md, ok := args["max_depth"].(float64); ok && md > 0 {
-		maxDepth = min(int(md), 3)
+		maxDepth = min(int(md), 5)
 	}
 
 	// Traversal mode: entity_id provided
@@ -110,7 +110,11 @@ func (t *KnowledgeGraphSearchTool) executeTraversal(ctx context.Context, agentID
 		for _, r := range results {
 			sb.WriteString(fmt.Sprintf("- [depth %d] %s (%s)", r.Depth, r.Entity.Name, r.Entity.EntityType))
 			if r.Via != "" {
-				sb.WriteString(fmt.Sprintf(" via %q", r.Via))
+				if strings.HasPrefix(r.Via, "~") {
+					sb.WriteString(fmt.Sprintf(" ←[%s]—", r.Via[1:]))
+				} else {
+					sb.WriteString(fmt.Sprintf(" —[%s]→", r.Via))
+				}
 			}
 			if r.Entity.Description != "" {
 				sb.WriteString(fmt.Sprintf("\n  %s", r.Entity.Description))

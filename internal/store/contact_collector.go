@@ -23,16 +23,17 @@ func NewContactCollector(s ContactStore, c cache.Cache[bool]) *ContactCollector 
 }
 
 // EnsureContact creates or refreshes a contact entry, skipping DB if recently seen.
-// contactType: "user" (individual sender) or "group" (group chat entity).
-func (c *ContactCollector) EnsureContact(ctx context.Context, channelType, channelInstance, senderID, userID, displayName, username, peerKind, contactType string) {
-	key := channelType + ":" + senderID
+// contactType: "user" (individual sender), "group" (group chat entity), or "topic" (forum topic).
+// Pass empty threadID/threadType for base contacts (DM, group root).
+func (c *ContactCollector) EnsureContact(ctx context.Context, channelType, channelInstance, senderID, userID, displayName, username, peerKind, contactType, threadID, threadType string) {
+	key := channelType + ":" + senderID + ":" + threadID
 	if _, ok := c.seen.Get(ctx, key); ok {
 		return
 	}
 	if contactType == "" {
 		contactType = "user"
 	}
-	if err := c.store.UpsertContact(ctx, channelType, channelInstance, senderID, userID, displayName, username, peerKind, contactType); err != nil {
+	if err := c.store.UpsertContact(ctx, channelType, channelInstance, senderID, userID, displayName, username, peerKind, contactType, threadID, threadType); err != nil {
 		slog.Warn("contact_collector.upsert_failed", "error", err, "channel", channelType, "sender", senderID)
 		return
 	}

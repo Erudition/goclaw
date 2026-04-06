@@ -610,17 +610,27 @@ func poolHealthLoop(ctx context.Context, ss *serverState) {
 			if err := ss.client.Ping(ctx); err != nil {
 				if isMethodNotFound(err) {
 					ss.connected.Store(true)
+					ss.mu.Lock()
+					ss.healthFailures = 0
+					ss.mu.Unlock()
 					continue
 				}
-				ss.connected.Store(false)
 				ss.mu.Lock()
+				ss.healthFailures++
+				failures := ss.healthFailures
 				ss.lastErr = err.Error()
 				ss.mu.Unlock()
-				slog.Warn("mcp.pool.health_failed", "server", ss.name, "error", err)
+
+				slog.Warn("mcp.pool.health_failed", "server", ss.name, "error", err, "consecutive", failures)
+
+				if failures >= healthFailThreshold {
+					ss.connected.Store(false)
+				}
 			} else {
 				ss.connected.Store(true)
 				ss.mu.Lock()
 				ss.reconnAttempts = 0
+				ss.healthFailures = 0
 				ss.lastErr = ""
 				ss.mu.Unlock()
 			}

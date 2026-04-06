@@ -307,6 +307,15 @@ func (r *Router) IsSessionBusy(sessionKey string) bool {
 	return ok
 }
 
+// SessionRunID returns the active run ID for a session, if any.
+func (r *Router) SessionRunID(sessionKey string) (string, bool) {
+	val, ok := r.sessionRuns.Load(sessionKey)
+	if !ok {
+		return "", false
+	}
+	return val.(string), true
+}
+
 // AbortRunsForSession cancels all active runs for a session key.
 // Returns the list of aborted run IDs.
 func (r *Router) AbortRunsForSession(sessionKey string) []string {

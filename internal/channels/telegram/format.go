@@ -105,11 +105,11 @@ func markdownToTelegramHTML(text string) string {
 	// Strikethrough
 	text = regexp.MustCompile(`~~(.+?)~~`).ReplaceAllString(text, "<s>$1</s>")
 
-	// Restore @mentions as clickable Telegram links
+	// Restore @mentions as plain text (protected from italic conversion above).
+	// Do NOT wrap in <a href="https://t.me/..."> — LLM @mentions are not
+	// necessarily Telegram usernames and auto-linking shows unwanted profile cards.
 	for i, mention := range mentionPlaceholders {
-		username := strings.TrimPrefix(mention, "@")
-		linked := fmt.Sprintf(`<a href="https://t.me/%s">%s</a>`, username, mention)
-		text = strings.ReplaceAll(text, fmt.Sprintf("\x00MN%d\x00", i), linked)
+		text = strings.ReplaceAll(text, fmt.Sprintf("\x00MN%d\x00", i), mention)
 	}
 
 	// List items

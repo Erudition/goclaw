@@ -176,7 +176,7 @@ func (s *PGCronStore) checkAndRunDueJobs() {
 		wg.Add(1)
 		go func(job store.CronJob) {
 			defer wg.Done()
-			s.executeOneJob(job, handler)
+			s.executeOneJob(job, handler, true)
 		}(job)
 	}
 	wg.Wait()
@@ -188,14 +188,20 @@ func (s *PGCronStore) checkAndRunDueJobs() {
 }
 
 // executeOneJob runs a single cron job with retry, logs the result, and updates next_run_at.
-func (s *PGCronStore) executeOneJob(job store.CronJob, handler func(job *store.CronJob) (*store.CronJobResult, error)) {
-	if id, parseErr := uuid.Parse(job.ID); parseErr == nil {
-		freshJob, ok := s.loadClaimedJob(id)
-		if !ok {
-			slog.Info("cron job skipped after claim state changed", "id", job.ID)
-			return
+// executeOneJob runs a claimed job. When reloadClaimed is true (scheduler path),
+// it re-reads the job from DB to verify claim invariants (enabled + next_run_at IS NULL).
+// When false (manual RunJob path), it uses the already-loaded job directly —
+// skipping the reload avoids the enabled=true filter that would reject disabled jobs.
+func (s *PGCronStore) executeOneJob(job store.CronJob, handler func(job *store.CronJob) (*store.CronJobResult, error), reloadClaimed bool) {
+	if reloadClaimed {
+		if id, parseErr := uuid.Parse(job.ID); parseErr == nil {
+			freshJob, ok := s.loadClaimedJob(id)
+			if !ok {
+				slog.Info("cron job skipped after claim state changed", "id", job.ID)
+				return
+			}
+			job = *freshJob
 		}
-		job = *freshJob
 	}
 
 	startTime := time.Now()

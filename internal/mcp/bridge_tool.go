@@ -154,9 +154,8 @@ func inputSchemaToMap(schema mcpgo.ToolInputSchema) map[string]any {
 }
 
 // stripEmptyOptionalArgs removes optional args with empty/placeholder values.
-// LLMs often send "" or placeholder strings (e.g. "__OMIT__", "null", "none")
-// for optional fields instead of omitting them, causing MCP servers to reject
-// invalid values (e.g. empty string for UUID fields).
+// LLMs often send "", "optional", "null", or null for optional fields instead
+// of omitting them, causing MCP servers to reject invalid values.
 func (t *BridgeTool) stripEmptyOptionalArgs(args map[string]any) map[string]any {
 	if len(args) == 0 {
 		return args
@@ -167,35 +166,56 @@ func (t *BridgeTool) stripEmptyOptionalArgs(args map[string]any) map[string]any 
 			cleaned[k] = v
 			continue
 		}
-		// Strip nil for optional fields.
+		// Strip nil/null for optional fields (also handles strict mode where model sends null).
 		if v == nil {
 			continue
 		}
-		// Strip empty strings and common LLM placeholder values for optional fields.
-		if s, ok := v.(string); ok && isPlaceholderValue(s) {
-			continue
+		if s, ok := v.(string); ok {
+			// Strip known placeholder values (e.g. "optional", "null", "http://example.com").
+			if isPlaceholderValue(s) {
+				continue
+			}
+			// Type-aware empty string: keep for string-typed params (user may want empty),
+			// strip for non-string params (empty string is never valid for number/boolean/UUID).
+			if s == "" && t.propertyType(k) != "string" {
+				continue
+			}
 		}
 		cleaned[k] = v
 	}
 	return cleaned
 }
 
-// isPlaceholderValue returns true for empty or placeholder strings that LLMs
-// commonly use when they don't intend to set an optional parameter.
+// propertyType returns the JSON Schema "type" for a property, or "" if unknown.
+func (t *BridgeTool) propertyType(name string) string {
+	props, _ := t.inputSchema["properties"].(map[string]any)
+	if props == nil {
+		return ""
+	}
+	prop, _ := props[name].(map[string]any)
+	if prop == nil {
+		return ""
+	}
+	typ, _ := prop["type"].(string)
+	return typ
+}
+
+// isPlaceholderValue returns true for placeholder strings that LLMs commonly
+// generate when they don't intend to set an optional parameter.
+// Empty string ("") is NOT handled here — see stripEmptyOptionalArgs for type-aware handling.
 func isPlaceholderValue(s string) bool {
-	// NOTE: empty string "" is NOT stripped — it may be intentional for text fields.
-	// Only strip known placeholder keywords and all-caps patterns.
 	if s == "" {
 		return false
 	}
-	// Normalize for case-insensitive comparison.
 	lower := strings.ToLower(strings.TrimSpace(s))
 	switch lower {
 	case "null", "none", "nil", "undefined", "n/a",
-		"__omit__", "__skip__", "__empty__":
+		"optional", "skip", // LLMs copy these from schema descriptions
+		"__omit__", "__skip__", "__empty__",
+		"http://example.com", "https://example.com", // common hallucinated URLs
+		"http://localhost", "https://localhost":
 		return true
 	}
-	// Catch all-caps placeholder patterns like "SHOULD_NOT_BE_HERE", "DO_NOT_SEND", "NOT_SET".
 	if isAllCapsPlaceholder(s) {
 		return true
 	}

@@ -26,6 +26,7 @@ import (
 // ResolverDeps holds shared dependencies for the agent resolver.
 type ResolverDeps struct {
 	AgentStore     store.AgentStore
+	ProviderStore  store.ProviderStore
 	ProviderReg    *providers.Registry
 	Bus            bus.EventPublisher
 	Sessions       store.SessionStore
@@ -134,15 +135,21 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			provider, _ = deps.ProviderReg.GetForTenant(ag.TenantID, names[0])
 			slog.Warn("agent provider not found, using fallback",
 				"agent", agentKey, "wanted", ag.Provider, "using", names[0])
-			if tl := ag.ParseThinkingLevel(); tl != "" && tl != "off" {
+			if rc := ag.ParseReasoningConfig(); rc.Effort != "" && rc.Effort != "off" {
 				slog.Warn("agent thinking may not be supported by fallback provider",
-					"agent", agentKey, "thinking_level", tl,
+					"agent", agentKey, "thinking_level", rc.Effort,
 					"wanted_provider", ag.Provider, "fallback_provider", names[0])
 			}
 		}
 
 		if provider == nil {
 			return nil, fmt.Errorf("no provider available for agent %s", agentKey)
+		}
+		providerReasoningDefaults := (*store.ProviderReasoningConfig)(nil)
+		if deps.ProviderStore != nil {
+			if providerData, err := deps.ProviderStore.GetProviderByName(ctx, provider.Name()); err == nil && providerData != nil {
+				providerReasoningDefaults = store.ParseProviderReasoningConfig(providerData.Settings)
+			}
 		}
 
 		// Load bootstrap files from DB
@@ -357,6 +364,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			AgentUUID:              ag.ID,
 			TenantID:               ag.TenantID,
 			AgentType:              ag.AgentType,
+			IsTeamLead:             isTeamLead,
 			Provider:               provider,
 			Model:                  ag.Model,
 			ContextWindow:          contextWindow,
@@ -393,7 +401,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			SandboxWorkspaceAccess: sandboxWorkspaceAccess,
 			BuiltinToolSettings:    builtinSettings,
 			DisabledTools:          disabledTools,
-			ThinkingLevel:          ag.ParseThinkingLevel(),
+			ReasoningConfig:        store.ResolveEffectiveReasoningConfig(providerReasoningDefaults, ag.ParseReasoningConfig()),
 			SelfEvolve:             ag.ParseSelfEvolve(),
 			SkillEvolve:            ag.AgentType == store.AgentTypePredefined && ag.ParseSkillEvolve(),
 			SkillNudgeInterval:     ag.ParseSkillNudgeInterval(),

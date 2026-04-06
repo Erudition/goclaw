@@ -12,7 +12,7 @@ export function useMCP() {
   const http = useHttp();
   const queryClient = useQueryClient();
 
-  const { data: servers = [], isLoading: loading } = useQuery({
+  const { data: servers = [], isLoading: loading, isFetching: fetching } = useQuery({
     queryKey: queryKeys.mcp.all,
     queryFn: async () => {
       const res = await http.get<{ servers: MCPServerData[] }>("/v1/mcp/servers");
@@ -157,6 +157,7 @@ export function useMCP() {
   return {
     servers,
     loading,
+    fetching,
     refresh: invalidate,
     createServer,
     updateServer,

@@ -161,7 +161,9 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req ChatRequest, onC
 	for i, rawJSON := range toolCallJSON {
 		if rawJSON != "" && i < len(result.ToolCalls) {
 			args := make(map[string]any)
-			_ = json.Unmarshal([]byte(rawJSON), &args)
+			if err := json.Unmarshal([]byte(rawJSON), &args); err != nil {
+				result.ToolCalls[i].ParseError = fmt.Sprintf("malformed JSON (%d chars): %v", len(rawJSON), err)
+			}
 			result.ToolCalls[i].Arguments = args
 		}
 	}
