@@ -33,6 +33,7 @@ type RunContext struct {
 	SharedMemory        bool
 	SharedKG            bool
 	RestrictToWorkspace bool
+	SandboxNetwork      bool
 
 	// Tool configuration
 	BuiltinToolSettings map[string][]byte
@@ -42,6 +43,7 @@ type RunContext struct {
 	ParentProvider      string
 	MemoryCfg           *config.MemoryConfig
 	SandboxCfg          *sandbox.Config
+	SandboxDir          string
 	ShellDenyGroups     map[string]bool
 
 	// Workspace

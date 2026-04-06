@@ -230,6 +230,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 		// For non-master tenants, prefix workspace with tenant slug directory.
 		workspace := ag.Workspace
 		if workspace != "" {
+			workspace = MigrateLegacyPath(workspace, deps.Workspace)
 			workspace = config.ExpandHome(workspace)
 			if !filepath.IsAbs(workspace) {
 				workspace, _ = filepath.Abs(workspace)
@@ -459,4 +460,20 @@ func derefInt(p *int) int {
 		return 0
 	}
 	return *p
+}
+
+// MigrateLegacyPath converts legacy hardcoded workspace paths to the current GlobalWorkspace.
+// This handles older agents that received "~/.goclaw/...", "/app/.goclaw/...", or "/.goclaw/..."
+// as their default workspace, which are unmounted ephemeral locations in Docker.
+func MigrateLegacyPath(path, globalWorkspace string) string {
+	if globalWorkspace == "" {
+		return path
+	}
+	legacyPrefixes := []string{"~/.goclaw/", "/app/.goclaw/", "/.goclaw/"}
+	for _, p := range legacyPrefixes {
+		if strings.HasPrefix(path, p) {
+			return filepath.Join(globalWorkspace, strings.TrimPrefix(path, p))
+		}
+	}
+	return path
 }

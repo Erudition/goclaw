@@ -49,6 +49,11 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	if l.selfEvolve {
 		ctx = store.WithSelfEvolve(ctx, true)
 	}
+	// Inject sandbox container directory for path mapping in tools
+	if l.sandboxContainerDir != "" {
+		ctx = tools.WithToolSandboxDir(ctx, l.sandboxContainerDir)
+		ctx = tools.WithToolSandboxNetwork(ctx, l.sandboxNetworkEnabled)
+	}
 	// Inject original sender ID for group file writer permission checks
 	if req.SenderID != "" {
 		ctx = store.WithSenderID(ctx, req.SenderID)
@@ -256,6 +261,8 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 		ParentProvider:      providerName,
 		MemoryCfg:           l.memoryCfg,
 		SandboxCfg:          l.sandboxCfg,
+		SandboxDir:          l.sandboxContainerDir,
+		SandboxNetwork:      l.sandboxNetworkEnabled,
 		ShellDenyGroups:     l.shellDenyGroups,
 		Workspace:           tools.ToolWorkspaceFromCtx(ctx),
 		TeamWorkspace:       tools.ToolTeamWorkspaceFromCtx(ctx),
