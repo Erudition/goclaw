@@ -54,6 +54,34 @@ func (h *VaultHandler) validateTeamMembership(ctx context.Context, w http.Respon
 	return true
 }
 
+// userAccessibleTeamIDs returns the team IDs accessible by the current non-owner user.
+// Returns nil if no teams are found or team store is unavailable.
+func (h *VaultHandler) userAccessibleTeamIDs(ctx context.Context) []string {
+	userID := store.UserIDFromContext(ctx)
+	if userID == "" || h.teamAccess == nil {
+		return nil
+	}
+	teams, err := h.teamAccess.ListUserTeams(ctx, userID)
+	if err != nil || len(teams) == 0 {
+		return nil
+	}
+	ids := make([]string, len(teams))
+	for i, t := range teams {
+		ids[i] = t.ID.String()
+	}
+	return ids
+}
+
+// applyNonOwnerTeamScope restricts a non-owner vault list to personal + user's teams.
+func (h *VaultHandler) applyNonOwnerTeamScope(ctx context.Context, opts *store.VaultListOptions) {
+	if ids := h.userAccessibleTeamIDs(ctx); len(ids) > 0 {
+		opts.TeamIDs = ids
+	} else {
+		empty := ""
+		opts.TeamID = &empty
+	}
+}
+
 func (h *VaultHandler) RegisterRoutes(mux *http.ServeMux) {
 	// Cross-agent endpoint (agent_id optional query param).
 	mux.HandleFunc("GET /v1/vault/documents", h.auth(h.handleListAllDocuments))
@@ -107,10 +135,9 @@ func (h *VaultHandler) handleListAllDocuments(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
-	// Non-owner without team_id filter: default to personal (NULL team_id) only.
+	// Non-owner without team_id filter: show personal + user's teams.
 	if opts.TeamID == nil && !store.IsOwnerRole(r.Context()) {
-		empty := ""
-		opts.TeamID = &empty
+		h.applyNonOwnerTeamScope(r.Context(), &opts)
 	}
 
 	docs, err := h.store.ListDocuments(r.Context(), tenantID.String(), agentID, opts)
@@ -141,8 +168,7 @@ func (h *VaultHandler) handleListDocuments(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	if opts.TeamID == nil && !store.IsOwnerRole(r.Context()) {
-		empty := ""
-		opts.TeamID = &empty
+		h.applyNonOwnerTeamScope(r.Context(), &opts)
 	}
 
 	docs, err := h.store.ListDocuments(r.Context(), tenantID.String(), agentID, opts)
@@ -224,8 +250,12 @@ func (h *VaultHandler) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		searchOpts.TeamID = &body.TeamID
 	} else if !store.IsOwnerRole(r.Context()) {
-		empty := ""
-		searchOpts.TeamID = &empty // non-owner: personal only
+		if ids := h.userAccessibleTeamIDs(r.Context()); len(ids) > 0 {
+			searchOpts.TeamIDs = ids
+		} else {
+			empty := ""
+			searchOpts.TeamID = &empty
+		}
 	}
 
 	results, err := h.store.Search(r.Context(), searchOpts)

@@ -15,6 +15,25 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
+// sqliteAppendTeamFilter appends the team_id clause to a vault query.
+func sqliteAppendTeamFilter(q string, args []any, teamID *string, teamIDs []string) (string, []any) {
+	if len(teamIDs) > 0 {
+		ph := strings.Repeat("?,", len(teamIDs)-1) + "?"
+		q += " AND (team_id IS NULL OR team_id IN (" + ph + "))"
+		for _, id := range teamIDs {
+			args = append(args, id)
+		}
+	} else if teamID != nil {
+		if *teamID != "" {
+			q += " AND team_id = ?"
+			args = append(args, *teamID)
+		} else {
+			q += " AND team_id IS NULL"
+		}
+	}
+	return q, args
+}
+
 // SQLiteVaultStore implements store.VaultStore backed by SQLite.
 type SQLiteVaultStore struct {
 	db *sql.DB
@@ -118,14 +137,7 @@ func (s *SQLiteVaultStore) ListDocuments(ctx context.Context, tenantID, agentID 
 		q += " AND agent_id = ?"
 		args = append(args, agentID)
 	}
-	if opts.TeamID != nil {
-		if *opts.TeamID != "" {
-			q += " AND team_id = ?"
-			args = append(args, *opts.TeamID)
-		} else {
-			q += " AND team_id IS NULL"
-		}
-	}
+	q, args = sqliteAppendTeamFilter(q, args, opts.TeamID, opts.TeamIDs)
 	if opts.Scope != "" {
 		q += " AND scope = ?"
 		args = append(args, opts.Scope)
@@ -176,14 +188,7 @@ func (s *SQLiteVaultStore) CountDocuments(ctx context.Context, tenantID, agentID
 		q += " AND agent_id = ?"
 		args = append(args, agentID)
 	}
-	if opts.TeamID != nil {
-		if *opts.TeamID != "" {
-			q += " AND team_id = ?"
-			args = append(args, *opts.TeamID)
-		} else {
-			q += " AND team_id IS NULL"
-		}
-	}
+	q, args = sqliteAppendTeamFilter(q, args, opts.TeamID, opts.TeamIDs)
 	if opts.Scope != "" {
 		q += " AND scope = ?"
 		args = append(args, opts.Scope)
@@ -248,14 +253,7 @@ func (s *SQLiteVaultStore) Search(ctx context.Context, opts store.VaultSearchOpt
 		  AND (title LIKE ? ESCAPE '\' OR path LIKE ? ESCAPE '\')`
 	args := []any{opts.TenantID, opts.AgentID, pattern, pattern}
 
-	if opts.TeamID != nil {
-		if *opts.TeamID != "" {
-			q += " AND team_id = ?"
-			args = append(args, *opts.TeamID)
-		} else {
-			q += " AND team_id IS NULL"
-		}
-	}
+	q, args = sqliteAppendTeamFilter(q, args, opts.TeamID, opts.TeamIDs)
 
 	q += " ORDER BY updated_at DESC LIMIT ?"
 	args = append(args, maxResults*2)

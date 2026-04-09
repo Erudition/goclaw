@@ -1,4 +1,4 @@
-import { useState, useMemo, lazy, Suspense } from "react";
+import { useState, useEffect, useMemo, lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
 import { Search, FileArchive, Plus, PanelLeftOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,6 @@ import { useTeams } from "@/pages/teams/hooks/use-teams";
 import { useIsMobile } from "@/hooks/use-media-query";
 import { useVaultDocuments, useVaultGraphData } from "./hooks/use-vault";
 import { VaultDocumentSidebar } from "./vault-document-sidebar";
-import { VaultDetailPanel } from "./vault-detail-panel";
 import { VaultSearchDialog } from "./vault-search-dialog";
 import { VaultCreateDialog } from "./vault-create-dialog";
 import type { VaultDocument } from "@/types/vault";
@@ -25,16 +24,17 @@ const PAGE_SIZE = 100;
 export function VaultPage() {
   const { t } = useTranslation("vault");
   const { agents } = useAgents();
-  const { teams } = useTeams();
+  const { teams, load: loadTeams } = useTeams();
   const isMobile = useIsMobile();
+
+  useEffect(() => { loadTeams(); }, [loadTeams]);
 
   const [selectedAgent, setSelectedAgent] = useState("");
   const [selectedTeam, setSelectedTeam] = useState("");
-  const [selectedDoc, setSelectedDoc] = useState<VaultDocument | null>(null);
+  const [detailDoc, setDetailDoc] = useState<VaultDocument | null>(null);
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
-  const [searchResultDoc, setSearchResultDoc] = useState<VaultDocument | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [page, setPage] = useState(0);
 
@@ -59,9 +59,9 @@ export function VaultPage() {
   const handleAgentChange = (v: string) => { setSelectedAgent(v); setPage(0); };
   const handleTeamChange = (v: string) => { setSelectedTeam(v); setPage(0); };
 
-  // Sidebar click → select doc + highlight graph node
+  // Sidebar click → open detail modal + highlight graph node
   const handleSidebarSelect = (doc: VaultDocument) => {
-    setSelectedDoc(doc);
+    setDetailDoc(doc);
     setSelectedDocId(doc.id);
     if (isMobile) setSidebarOpen(false);
   };
@@ -69,16 +69,15 @@ export function VaultPage() {
   // Graph single-click → highlight only
   const handleNodeSelect = (docId: string | null) => {
     setSelectedDocId(docId);
-    if (!docId) setSelectedDoc(null);
   };
 
-  // Graph double-click → open detail + highlight
+  // Graph double-click → open detail modal + highlight
   const handleNodeDoubleClick = (doc: VaultDocument) => {
-    setSelectedDoc(doc);
+    setDetailDoc(doc);
     setSelectedDocId(doc.id);
   };
 
-  const handleCloseDetail = () => { setSelectedDoc(null); setSelectedDocId(null); };
+  const handleCloseDetail = () => { setDetailDoc(null); };
 
   return (
     <div className="relative flex h-full overflow-hidden">
@@ -109,7 +108,7 @@ export function VaultPage() {
       {/* Main: header + graph + detail panel */}
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Header */}
-        <div className="flex items-center gap-2 px-3 py-2 border-b flex-wrap shrink-0">
+        <div className="flex h-10 items-center gap-2 px-3 border-b shrink-0">
           {isMobile && (
             <Button variant="ghost" size="xs" className="h-7 w-7 p-0" onClick={() => setSidebarOpen(true)}>
               <PanelLeftOpen className="h-4 w-4" />
@@ -120,17 +119,15 @@ export function VaultPage() {
 
           {/* Filters */}
           <select value={selectedAgent} onChange={(e) => handleAgentChange(e.target.value)}
-            className="text-base md:text-sm border rounded px-2 py-1 bg-background h-8">
+            className="text-base md:text-sm border rounded px-2 py-1 bg-background h-7">
             <option value="">{t("allAgents")}</option>
             {(agents ?? []).map((a) => <option key={a.id} value={a.id}>{a.display_name || a.agent_key}</option>)}
           </select>
-          {(teams ?? []).length > 0 && (
-            <select value={selectedTeam} onChange={(e) => handleTeamChange(e.target.value)}
-              className="text-base md:text-sm border rounded px-2 py-1 bg-background h-8">
-              <option value="">{t("allTeams", "All teams")}</option>
-              {(teams ?? []).map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
-            </select>
-          )}
+          <select value={selectedTeam} onChange={(e) => handleTeamChange(e.target.value)}
+            className="text-base md:text-sm border rounded px-2 py-1 bg-background h-7">
+            <option value="">{t("allTeams", "All teams")}</option>
+            {(teams ?? []).map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+          </select>
           <Button size="sm" variant="outline" onClick={() => setSearchOpen(true)} disabled={!selectedAgent}>
             <Search className="h-3.5 w-3.5" />
           </Button>
@@ -148,7 +145,7 @@ export function VaultPage() {
           </TooltipProvider>
         </div>
 
-        {/* Graph */}
+        {/* Graph — takes full remaining height */}
         <div className="flex-1 min-h-0 relative">
           <Suspense fallback={<div className="h-full animate-pulse bg-muted" />}>
             <VaultGraphView
@@ -160,31 +157,23 @@ export function VaultPage() {
             />
           </Suspense>
         </div>
-
-        {/* Detail panel (bottom, collapsible) */}
-        <VaultDetailPanel
-          doc={selectedDoc}
-          open={!!selectedDoc}
-          onClose={handleCloseDetail}
-          onDeleted={handleCloseDetail}
-        />
       </div>
 
-      {/* Search dialog — result opens legacy modal */}
+      {/* Search dialog — result opens detail modal */}
       {selectedAgent && (
         <VaultSearchDialog
           agentId={selectedAgent} open={searchOpen} onOpenChange={setSearchOpen}
-          onSelectResult={setSearchResultDoc}
+          onSelectResult={(doc) => { setDetailDoc(doc); setSelectedDocId(doc.id); }}
         />
       )}
       {selectedAgent && <VaultCreateDialog agentId={selectedAgent} open={createOpen} onOpenChange={setCreateOpen} />}
 
-      {/* Legacy detail dialog for search results only */}
+      {/* Detail dialog for all document views */}
       <Suspense fallback={null}>
         <VaultDetailDialog
-          doc={searchResultDoc} open={!!searchResultDoc}
-          onOpenChange={(open) => !open && setSearchResultDoc(null)}
-          onDeleted={() => setSearchResultDoc(null)}
+          doc={detailDoc} open={!!detailDoc}
+          onOpenChange={(open) => { if (!open) handleCloseDetail(); }}
+          onDeleted={handleCloseDetail}
         />
       </Suspense>
     </div>

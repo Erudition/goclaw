@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"log/slog"
 	"sort"
 	"time"
@@ -12,6 +13,29 @@ import (
 	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
+
+// appendTeamFilter appends the team_id clause to a vault query.
+// TeamIDs (personal + listed teams) takes precedence over TeamID (single team / personal-only).
+func appendTeamFilter(q string, args []any, p int, teamID *string, teamIDs []string) (string, []any, int) {
+	if len(teamIDs) > 0 {
+		ph := make([]string, len(teamIDs))
+		for i, id := range teamIDs {
+			ph[i] = fmt.Sprintf("$%d", p)
+			args = append(args, mustParseUUID(id))
+			p++
+		}
+		q += " AND (team_id IS NULL OR team_id IN (" + strings.Join(ph, ",") + "))"
+	} else if teamID != nil {
+		if *teamID != "" {
+			q += fmt.Sprintf(" AND team_id = $%d", p)
+			args = append(args, mustParseUUID(*teamID))
+			p++
+		} else {
+			q += " AND team_id IS NULL"
+		}
+	}
+	return q, args, p
+}
 
 // PGVaultStore implements store.VaultStore backed by PostgreSQL.
 type PGVaultStore struct {
@@ -177,15 +201,7 @@ func (s *PGVaultStore) ListDocuments(ctx context.Context, tenantID, agentID stri
 		p++
 	}
 
-	if opts.TeamID != nil {
-		if *opts.TeamID != "" {
-			q += fmt.Sprintf(" AND team_id = $%d", p)
-			args = append(args, mustParseUUID(*opts.TeamID))
-			p++
-		} else {
-			q += " AND team_id IS NULL"
-		}
-	}
+	q, args, p = appendTeamFilter(q, args, p, opts.TeamID, opts.TeamIDs)
 
 	if opts.Scope != "" {
 		q += fmt.Sprintf(" AND scope = $%d", p)
@@ -237,15 +253,7 @@ func (s *PGVaultStore) CountDocuments(ctx context.Context, tenantID, agentID str
 		args = append(args, aid)
 		p++
 	}
-	if opts.TeamID != nil {
-		if *opts.TeamID != "" {
-			q += fmt.Sprintf(" AND team_id = $%d", p)
-			args = append(args, mustParseUUID(*opts.TeamID))
-			p++
-		} else {
-			q += " AND team_id IS NULL"
-		}
-	}
+	q, args, p = appendTeamFilter(q, args, p, opts.TeamID, opts.TeamIDs)
 	if opts.Scope != "" {
 		q += fmt.Sprintf(" AND scope = $%d", p)
 		args = append(args, opts.Scope)
@@ -281,17 +289,8 @@ func (s *PGVaultStore) Search(ctx context.Context, opts store.VaultSearchOptions
 	tid := mustParseUUID(opts.TenantID)
 	aid := mustParseUUID(opts.AgentID)
 
-	// Parse team_id filter.
-	var teamUUID *uuid.UUID
-	if opts.TeamID != nil {
-		if *opts.TeamID != "" {
-			t := mustParseUUID(*opts.TeamID)
-			teamUUID = &t
-		}
-		// opts.TeamID == ptr-to-empty → teamUUID stays nil → filters for team_id IS NULL
-	}
-	// opts.TeamID == nil → teamUUID stays nil and useTeamFilter = false (handled below)
-	useTeamFilter := opts.TeamID != nil
+	// Build team filter for search sub-queries.
+	tf := buildSearchTeamFilter(opts.TeamID, opts.TeamIDs)
 
 	maxResults := opts.MaxResults
 	if maxResults <= 0 {
@@ -299,7 +298,7 @@ func (s *PGVaultStore) Search(ctx context.Context, opts store.VaultSearchOptions
 	}
 
 	// FTS search
-	ftsResults, err := s.ftsSearch(ctx, opts.Query, tid, aid, teamUUID, useTeamFilter, opts.Scope, opts.DocTypes, maxResults*2)
+	ftsResults, err := s.ftsSearch(ctx, opts.Query, tid, aid, tf, opts.Scope, opts.DocTypes, maxResults*2)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +309,7 @@ func (s *PGVaultStore) Search(ctx context.Context, opts store.VaultSearchOptions
 		vecs, embErr := s.embProvider.Embed(ctx, []string{opts.Query})
 		if embErr == nil && len(vecs) > 0 {
 			var vecErr error
-			vecResults, vecErr = s.vectorSearch(ctx, vecs[0], tid, aid, teamUUID, useTeamFilter, opts.Scope, opts.DocTypes, maxResults*2)
+			vecResults, vecErr = s.vectorSearch(ctx, vecs[0], tid, aid, tf, opts.Scope, opts.DocTypes, maxResults*2)
 			if vecErr != nil {
 				slog.Debug("vault.vector_search_fallback", "err", vecErr)
 				vecResults = nil
@@ -334,7 +333,55 @@ func (s *PGVaultStore) Search(ctx context.Context, opts store.VaultSearchOptions
 	return merged, nil
 }
 
-func (s *PGVaultStore) ftsSearch(ctx context.Context, query string, tenantID, agentID uuid.UUID, teamID *uuid.UUID, useTeamFilter bool, scope string, docTypes []string, limit int) ([]store.VaultSearchResult, error) {
+// searchTeamFilter holds pre-parsed team filter info for search sub-queries.
+type searchTeamFilter struct {
+	teamIDs []uuid.UUID // personal + these teams (len > 0 = multi-team mode)
+	teamID  *uuid.UUID  // single team filter (nil + active = personal-only)
+	active  bool        // whether any team filter is applied
+}
+
+func buildSearchTeamFilter(teamID *string, teamIDs []string) searchTeamFilter {
+	if len(teamIDs) > 0 {
+		uuids := make([]uuid.UUID, len(teamIDs))
+		for i, id := range teamIDs {
+			uuids[i] = mustParseUUID(id)
+		}
+		return searchTeamFilter{teamIDs: uuids, active: true}
+	}
+	if teamID != nil {
+		if *teamID != "" {
+			t := mustParseUUID(*teamID)
+			return searchTeamFilter{teamID: &t, active: true}
+		}
+		return searchTeamFilter{active: true} // personal-only
+	}
+	return searchTeamFilter{} // no filter
+}
+
+// appendSearchTeamClause appends team filter SQL to a search query.
+func (tf searchTeamFilter) append(q string, args []any, p int) (string, []any, int) {
+	if !tf.active {
+		return q, args, p
+	}
+	if len(tf.teamIDs) > 0 {
+		ph := make([]string, len(tf.teamIDs))
+		for i, id := range tf.teamIDs {
+			ph[i] = fmt.Sprintf("$%d", p)
+			args = append(args, id)
+			p++
+		}
+		q += " AND (team_id IS NULL OR team_id IN (" + strings.Join(ph, ",") + "))"
+	} else if tf.teamID != nil {
+		q += fmt.Sprintf(" AND team_id = $%d", p)
+		args = append(args, *tf.teamID)
+		p++
+	} else {
+		q += " AND team_id IS NULL"
+	}
+	return q, args, p
+}
+
+func (s *PGVaultStore) ftsSearch(ctx context.Context, query string, tenantID, agentID uuid.UUID, tf searchTeamFilter, scope string, docTypes []string, limit int) ([]store.VaultSearchResult, error) {
 	q := `SELECT id, tenant_id, agent_id, team_id, scope, custom_scope, path, title, doc_type, content_hash, summary, metadata, created_at, updated_at,
 			ts_rank(tsv, plainto_tsquery('simple', $1)) AS score
 		FROM vault_documents
@@ -342,15 +389,7 @@ func (s *PGVaultStore) ftsSearch(ctx context.Context, query string, tenantID, ag
 	args := []any{query, tenantID, agentID}
 	p := 4
 
-	if useTeamFilter {
-		if teamID != nil {
-			q += fmt.Sprintf(" AND team_id = $%d", p)
-			args = append(args, *teamID)
-			p++
-		} else {
-			q += " AND team_id IS NULL"
-		}
-	}
+	q, args, p = tf.append(q, args, p)
 
 	if scope != "" {
 		q += fmt.Sprintf(" AND scope = $%d", p)
@@ -373,7 +412,7 @@ func (s *PGVaultStore) ftsSearch(ctx context.Context, query string, tenantID, ag
 	return vaultSearchRowsToResults(scanned, "vault"), nil
 }
 
-func (s *PGVaultStore) vectorSearch(ctx context.Context, embedding []float32, tenantID, agentID uuid.UUID, teamID *uuid.UUID, useTeamFilter bool, scope string, docTypes []string, limit int) ([]store.VaultSearchResult, error) {
+func (s *PGVaultStore) vectorSearch(ctx context.Context, embedding []float32, tenantID, agentID uuid.UUID, tf searchTeamFilter, scope string, docTypes []string, limit int) ([]store.VaultSearchResult, error) {
 	vecStr := vectorToString(embedding)
 	q := `SELECT id, tenant_id, agent_id, team_id, scope, custom_scope, path, title, doc_type, content_hash, summary, metadata, created_at, updated_at,
 			1 - (embedding <=> $1) AS score
@@ -382,15 +421,7 @@ func (s *PGVaultStore) vectorSearch(ctx context.Context, embedding []float32, te
 	args := []any{vecStr, tenantID, agentID}
 	p := 4
 
-	if useTeamFilter {
-		if teamID != nil {
-			q += fmt.Sprintf(" AND team_id = $%d", p)
-			args = append(args, *teamID)
-			p++
-		} else {
-			q += " AND team_id IS NULL"
-		}
-	}
+	q, args, p = tf.append(q, args, p)
 
 	if scope != "" {
 		q += fmt.Sprintf(" AND scope = $%d", p)

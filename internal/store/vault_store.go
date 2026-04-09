@@ -55,6 +55,7 @@ type VaultSearchOptions struct {
 	AgentID    string
 	TenantID   string
 	TeamID     *string  // nil = no filter, ptr-to-empty = personal (NULL team_id), ptr-to-uuid = specific team
+	TeamIDs    []string // non-nil = personal (NULL) + these team UUIDs (used for "all accessible" view)
 	Scope      string   // empty = all scopes
 	DocTypes   []string // empty = all types
 	MaxResults int      // default 10
@@ -64,6 +65,7 @@ type VaultSearchOptions struct {
 // VaultListOptions configures a list query for vault documents.
 type VaultListOptions struct {
 	TeamID   *string  // nil = no filter, ptr-to-empty = personal (NULL team_id), ptr-to-uuid = specific team
+	TeamIDs  []string // non-nil = personal (NULL) + these team UUIDs (used for "all accessible" view)
 	Scope    string   // empty = all
 	DocTypes []string // empty = all
 	Limit    int
