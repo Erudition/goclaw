@@ -15,6 +15,16 @@ type ContextState struct {
 	Summary        string // session summary for context continuity
 	HadBootstrap   bool
 	OverheadTokens int // system prompt + context files (accurate via TokenCounter)
+
+	// EffectiveContextWindow is the context window size (in tokens) resolved
+	// per-run from the provider/model pair via ModelRegistry. Resolved ONCE in
+	// ContextStage and read by PruneStage on every iteration. Zero means "no
+	// model-specific data available" and PruneStage falls back to
+	// PipelineConfig.ContextWindow.
+	//
+	// Resolved once per run (not per iteration) to avoid budget skew — if the
+	// model somehow changes mid-run a mismatch causes silent truncation loops.
+	EffectiveContextWindow int
 }
 
 // ThinkState: owned by ThinkStage.

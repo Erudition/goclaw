@@ -30,6 +30,7 @@ type ResolverDeps struct {
 	AgentStore     store.AgentStore
 	ProviderStore  store.ProviderStore
 	ProviderReg    *providers.Registry
+	ModelRegistry  providers.ModelRegistry // per-model context window + capabilities lookup
 	Bus            bus.EventPublisher
 	Sessions       store.SessionStore
 	Tools          *tools.Registry
@@ -412,6 +413,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			AutoInjector:          deps.AutoInjector,
 			Provider:               provider,
 			Model:                  ag.Model,
+			ModelRegistry:          deps.ModelRegistry,
 			ContextWindow:          contextWindow,
 			MaxTokens:              ag.ParseMaxTokens(),
 			MaxIterations:          maxIter,

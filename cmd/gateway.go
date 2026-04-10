@@ -284,7 +284,7 @@ func runGateway() {
 	var mcpPool *mcpbridge.Pool
 	var mediaStore *media.Store
 	var postTurn tools.PostTurnProcessor
-	contextFileInterceptor, mcpPool, mediaStore, postTurn = wireExtras(pgStores, agentRouter, providerRegistry, msgBus, pgStores.Sessions, toolsReg, toolPE, skillsLoader, hasMemory, traceCollector, workspace, cfg.Gateway.InjectionAction, cfg, sandboxMgr, redisClient, domainBus)
+	contextFileInterceptor, mcpPool, mediaStore, postTurn = wireExtras(pgStores, agentRouter, providerRegistry, modelReg, msgBus, pgStores.Sessions, toolsReg, toolPE, skillsLoader, hasMemory, traceCollector, workspace, cfg.Gateway.InjectionAction, cfg, sandboxMgr, redisClient, domainBus)
 	if mcpPool != nil {
 		defer mcpPool.Stop()
 	}
@@ -511,8 +511,10 @@ func runGateway() {
 		methods.NewTenantsMethods(pgStores.Tenants, msgBus, workspace).Register(server.Router())
 		server.SetTenantsHandler(httpapi.NewTenantsHandler(pgStores.Tenants, msgBus, workspace))
 		server.Router().SetTenantStore(pgStores.Tenants)
-		// Permission cache for tenant membership checks
+		// Permission cache for tenant membership checks. Store on deps so
+		// lifecycle shutdown can call Close() to stop the sweep goroutines.
 		permCache := cache.NewPermissionCache()
+		deps.permCache = permCache
 		msgBus.Subscribe("permission-cache", func(e bus.Event) {
 			if p, ok := e.Payload.(bus.CacheInvalidatePayload); ok {
 				permCache.HandleInvalidation(p)

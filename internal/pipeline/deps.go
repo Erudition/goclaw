@@ -18,12 +18,20 @@ type PipelineDeps struct {
 	EventBus     eventbus.DomainEventBus
 	Config       PipelineConfig
 
+	// ResolveContextWindow returns the effective context window (in tokens) for
+	// a given provider/model pair. Nil = always use Config.ContextWindow.
+	// Invoked ONCE per run by ContextStage and stored in RunState.Context.EffectiveContextWindow.
+	ResolveContextWindow func(provider, model string) int
+
 	// Callbacks from agent.Loop — Phase 8 adapter wires these.
 	EmitEvent func(event any)
 
 	// Auto-inject memory context (ContextStage, L0 tier).
-	// Callback captures agent/tenant context via closure.
-	AutoInject func(ctx context.Context, userMessage, userID string) (string, error)
+	// Callback captures agent/tenant context via closure. recentContext carries
+	// a short snippet of recent conversation (last 1-2 user turns) so the
+	// downstream recall query can resolve pronouns and implicit references.
+	// Empty recentContext = legacy single-message search semantics.
+	AutoInject func(ctx context.Context, userMessage, userID, recentContext string) (string, error)
 
 	// InjectContext sets up agent/tenant/user/workspace/tool context values.
 	// Wraps injectContext() for v3 pipeline. Called once at ContextStage start.
@@ -91,6 +99,14 @@ type PipelineConfig struct {
 	ContextWindow      int
 	MaxTokens          int
 	Compaction         *config.CompactionConfig
+
+	// ReserveTokens is a safety buffer subtracted from the history budget so
+	// PruneStage compacts slightly before the hard limit. Prevents edge cases
+	// where a provider returns more than MaxTokens output or where the token
+	// counter's estimate drifts upward during streaming.
+	// Zero (default) preserves legacy behavior: budget = contextWindow - overhead - MaxTokens.
+	// Recommended: 5-10% of contextWindow for reasoning-heavy models.
+	ReserveTokens int
 
 	// V3 memory/retrieval flags removed — always true at runtime.
 	// Memory flush runs if callback != nil; auto-inject runs if AutoInject != nil.

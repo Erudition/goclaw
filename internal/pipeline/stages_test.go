@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
@@ -497,6 +498,193 @@ func TestPruneStage_ZeroBudget_NoOp(t *testing.T) {
 	}
 	if stage.Result() != Continue {
 		t.Errorf("Result() = %v, want Continue for zero budget", stage.Result())
+	}
+}
+
+// TestPruneStage_EffectiveContextWindow_OverridesConfig verifies that when
+// ContextStage has resolved a per-model context window (e.g. gpt-4o=128k
+// vs Config.ContextWindow=10k), PruneStage uses the resolved value.
+//
+// Without this, swapping models at session time would leave the pipeline
+// pruning against the wrong budget. Phase 4 regression gate.
+func TestPruneStage_EffectiveContextWindow_OverridesConfig(t *testing.T) {
+	t.Parallel()
+	pruneCallCount := 0
+	// Config says 10k window, but model-specific resolution says 128k.
+	// History is 60k tokens — would be over budget at 10k (fires prune),
+	// under budget at 128k (no prune should happen).
+	deps := &PipelineDeps{
+		Config: PipelineConfig{
+			ContextWindow: 10_000, // stale/default — should be ignored
+			MaxTokens:     1_000,
+		},
+		TokenCounter: &mockTokenCounter{countPerMessage: 600},
+		PruneMessages: func(msgs []providers.Message, _ int) []providers.Message {
+			pruneCallCount++
+			return msgs
+		},
+	}
+	stage := NewPruneStage(deps, nil)
+	state := defaultState()
+	state.Context.EffectiveContextWindow = 128_000 // resolved by ContextStage
+
+	history := make([]providers.Message, 100) // 100 * 600 = 60k < budget 127k
+	for i := range history {
+		history[i] = providers.Message{Role: "user", Content: "msg"}
+	}
+	state.Messages.SetHistory(history)
+
+	if err := stage.Execute(context.Background(), state); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if pruneCallCount != 0 {
+		t.Errorf("PruneMessages should not fire with 128k window, called %d times", pruneCallCount)
+	}
+}
+
+// --- buildRecentContext tests (Phase 9) ---
+
+func TestBuildRecentContext_EmptyHistory(t *testing.T) {
+	t.Parallel()
+	if got := buildRecentContext(nil); got != "" {
+		t.Errorf("empty history should return empty, got %q", got)
+	}
+}
+
+func TestBuildRecentContext_SkipsNonUserMessages(t *testing.T) {
+	t.Parallel()
+	hist := []providers.Message{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "hi back"},
+		{Role: "tool", Content: "tool output"},
+	}
+	got := buildRecentContext(hist)
+	if got != "hello" {
+		t.Errorf("should only include user messages, got %q", got)
+	}
+}
+
+func TestBuildRecentContext_CapsAtTwoTurns(t *testing.T) {
+	t.Parallel()
+	hist := []providers.Message{
+		{Role: "user", Content: "first"},
+		{Role: "assistant", Content: "reply"},
+		{Role: "user", Content: "second"},
+		{Role: "assistant", Content: "reply"},
+		{Role: "user", Content: "third"},
+	}
+	got := buildRecentContext(hist)
+	// Should contain last two user turns ("second" and "third"), not "first"
+	if !strings.Contains(got, "second") {
+		t.Errorf("missing second turn, got %q", got)
+	}
+	if !strings.Contains(got, "third") {
+		t.Errorf("missing third turn, got %q", got)
+	}
+	if strings.Contains(got, "first") {
+		t.Errorf("should exclude old turns, got %q", got)
+	}
+}
+
+func TestBuildRecentContext_PreservesTurnOrder(t *testing.T) {
+	t.Parallel()
+	hist := []providers.Message{
+		{Role: "user", Content: "earlier"},
+		{Role: "user", Content: "later"},
+	}
+	got := buildRecentContext(hist)
+	// "earlier" should come before "later" in the output
+	earlierIdx := strings.Index(got, "earlier")
+	laterIdx := strings.Index(got, "later")
+	if earlierIdx == -1 || laterIdx == -1 || earlierIdx >= laterIdx {
+		t.Errorf("order broken: got %q (earlier=%d, later=%d)", got, earlierIdx, laterIdx)
+	}
+}
+
+func TestBuildRecentContext_TruncatesLongMessages(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("x", 500)
+	hist := []providers.Message{
+		{Role: "user", Content: long},
+	}
+	got := buildRecentContext(hist)
+	if len(got) > 300 {
+		t.Errorf("result should be capped at 300 chars, got %d", len(got))
+	}
+}
+
+// --- Prune Stage tests continued ---
+
+// TestPruneStage_ReserveTokens_BuffersBudget verifies that ReserveTokens is
+// subtracted from the usable budget so compaction fires earlier than the hard
+// limit. Phase 5 regression gate for provider over-delivery protection.
+func TestPruneStage_ReserveTokens_BuffersBudget(t *testing.T) {
+	t.Parallel()
+	pruneCallCount := 0
+	// Without reserve: budget = 10000 - 0 - 1000 = 9000, softThreshold 6300
+	// With reserve=2000: budget = 10000 - 0 - 1000 - 2000 = 7000, softThreshold 4900
+	// 50 msgs * 100 = 5000 tokens — crosses the 4900 soft threshold only when reserve is set.
+	deps := &PipelineDeps{
+		Config: PipelineConfig{
+			ContextWindow: 10_000,
+			MaxTokens:     1_000,
+			ReserveTokens: 2_000,
+		},
+		TokenCounter: &mockTokenCounter{countPerMessage: 100},
+		PruneMessages: func(msgs []providers.Message, _ int) []providers.Message {
+			pruneCallCount++
+			return msgs[:1]
+		},
+	}
+	stage := NewPruneStage(deps, nil)
+	state := defaultState()
+	history := make([]providers.Message, 50)
+	for i := range history {
+		history[i] = providers.Message{Role: "user", Content: "msg"}
+	}
+	state.Messages.SetHistory(history)
+
+	if err := stage.Execute(context.Background(), state); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if pruneCallCount != 1 {
+		t.Errorf("ReserveTokens should have triggered early prune, called %d times", pruneCallCount)
+	}
+}
+
+// TestPruneStage_EffectiveContextWindow_ZeroFallsBackToConfig verifies
+// backward compatibility: when ContextStage hasn't resolved a model-specific
+// window (unknown model, nil resolver, no registry), PruneStage falls back
+// to Config.ContextWindow — matching pre-Phase-4 behavior.
+func TestPruneStage_EffectiveContextWindow_ZeroFallsBackToConfig(t *testing.T) {
+	t.Parallel()
+	pruneCallCount := 0
+	deps := &PipelineDeps{
+		Config: PipelineConfig{
+			ContextWindow: 10_000, // used because EffectiveContextWindow=0
+			MaxTokens:     1_000,
+		},
+		TokenCounter: &mockTokenCounter{countPerMessage: 600},
+		PruneMessages: func(msgs []providers.Message, _ int) []providers.Message {
+			pruneCallCount++
+			return msgs[:1]
+		},
+	}
+	stage := NewPruneStage(deps, nil)
+	state := defaultState()
+	// state.Context.EffectiveContextWindow left as zero
+
+	history := make([]providers.Message, 20) // 20 * 600 = 12k > 10k → should prune
+	for i := range history {
+		history[i] = providers.Message{Role: "user", Content: "msg"}
+	}
+	state.Messages.SetHistory(history)
+
+	if err := stage.Execute(context.Background(), state); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if pruneCallCount == 0 {
+		t.Error("PruneMessages should fire with 10k fallback window")
 	}
 }
 

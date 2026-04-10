@@ -76,6 +76,7 @@ type Loop struct {
 	defaultTimezone  string    // system default timezone for bootstrap pre-fill
 	provider         providers.Provider
 	model            string
+	modelRegistry    providers.ModelRegistry // resolves per-model context window at run time (nil = use static contextWindow)
 	contextWindow    int
 	maxTokens        int // max output tokens per LLM call (0 = default 8192)
 	maxIterations    int
@@ -258,6 +259,10 @@ type LoopConfig struct {
 	MemoryCfg    *config.MemoryConfig
 	SandboxCfg   *sandbox.Config
 
+	// ModelRegistry resolves provider/model → ModelSpec for per-run context
+	// window lookup. Nil = fall back to static LoopConfig.ContextWindow.
+	ModelRegistry providers.ModelRegistry
+
 	Bus             bus.EventPublisher
 	DomainBus       eventbus.DomainEventBus // V3 domain event bus for consolidation pipeline
 	Sessions        store.SessionStore
@@ -412,6 +417,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		agentType:              cfg.AgentType,
 		provider:               cfg.Provider,
 		model:                  cfg.Model,
+		modelRegistry:          cfg.ModelRegistry,
 		contextWindow:          cfg.ContextWindow,
 		maxTokens:              cfg.MaxTokens,
 		maxIterations:          cfg.MaxIterations,

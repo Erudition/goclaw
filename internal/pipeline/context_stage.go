@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
@@ -32,6 +33,21 @@ func (s *ContextStage) Execute(ctx context.Context, state *RunState) error {
 		}
 		ctx = enrichedCtx
 		state.Ctx = ctx
+	}
+
+	// 0.5. Resolve the effective context window for this run's provider/model.
+	// Done once here so PruneStage reads a stable value on every iteration and
+	// the budget can't drift if the model somehow changes mid-run. A zero
+	// result from the resolver (unknown model, no registry) leaves the field
+	// zero — PruneStage then falls back to Config.ContextWindow.
+	if s.deps.ResolveContextWindow != nil && state.Model != "" {
+		providerID := ""
+		if state.Provider != nil {
+			providerID = state.Provider.Name()
+		}
+		if cw := s.deps.ResolveContextWindow(providerID, state.Model); cw > 0 {
+			state.Context.EffectiveContextWindow = cw
+		}
 	}
 
 	// 1. Resolve workspace
@@ -96,8 +112,11 @@ func (s *ContextStage) Execute(ctx context.Context, state *RunState) error {
 
 	// 8. Auto-inject L0 memory context into system prompt.
 	// V3RetrievalEnabled check removed — auto-inject runs whenever AutoInject is available.
+	// Phase 9: pass recent conversation context so vector search can resolve
+	// pronouns and implicit references in follow-up questions.
 	if s.deps.AutoInject != nil && state.Input.Message != "" {
-		section, err := s.deps.AutoInject(ctx, state.Input.Message, state.Input.UserID)
+		recentCtx := buildRecentContext(state.Messages.History())
+		section, err := s.deps.AutoInject(ctx, state.Input.Message, state.Input.UserID, recentCtx)
 		if err == nil && section != "" {
 			state.Context.MemorySection = section
 			sys := state.Messages.System()
@@ -107,6 +126,50 @@ func (s *ContextStage) Execute(ctx context.Context, state *RunState) error {
 	}
 
 	return nil
+}
+
+// buildRecentContext concatenates the trailing user turns from the history
+// buffer into a short snippet suitable for enriching a recall query. Walks
+// backward from the end so we keep the most recent turns regardless of
+// earlier messages being pruned. Returns "" when there's no usable context.
+//
+// Budget: up to 2 user turns, max ~300 runes total. Rune (not byte) cap keeps
+// vi/zh locales safe — a byte-wise clip would slice multi-byte characters
+// and emit invalid UTF-8 to the embedding model. Tuning knob is intentional
+// here rather than config-driven — Phase 9 adds it only if operational data
+// shows variance across agent types.
+func buildRecentContext(history []providers.Message) string {
+	const maxTurns = 2
+	const maxRunes = 300
+	if len(history) == 0 {
+		return ""
+	}
+	turns := make([]string, 0, maxTurns)
+	for i := len(history) - 1; i >= 0 && len(turns) < maxTurns; i-- {
+		m := history[i]
+		if m.Role != "user" || m.Content == "" {
+			continue
+		}
+		turns = append([]string{m.Content}, turns...) // prepend to preserve order
+	}
+	if len(turns) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for i, t := range turns {
+		if i > 0 {
+			sb.WriteString(" | ")
+		}
+		sb.WriteString(t)
+	}
+	joined := sb.String()
+	// Rune-safe tail clip: keep the most recent portion of the conversation
+	// (closest in time to the current turn) rather than the oldest.
+	runes := []rune(joined)
+	if len(runes) > maxRunes {
+		joined = string(runes[len(runes)-maxRunes:])
+	}
+	return joined
 }
 
 // toAnySlice converts []bootstrap.ContextFile to []any for ContextState.ContextFiles.

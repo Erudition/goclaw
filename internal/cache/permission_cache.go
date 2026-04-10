@@ -23,13 +23,41 @@ type PermissionCache struct {
 	teamAccess  *InMemoryCache[bool]
 }
 
-// NewPermissionCache creates a new permission cache.
+// permissionCacheSweepInterval and permissionCacheMaxSize bound background
+// growth of per-user cache entries. Without these, long-running gateways with
+// many distinct users would accumulate unbounded entries (tenant_roles, agent
+// access, team access) even with a 30s TTL — lazy eviction only fires on Get,
+// so entries for disconnected users never get reclaimed.
+const (
+	permissionCacheSweepInterval = 60 * time.Second
+	permissionCacheMaxSize       = 10_000
+)
+
+// NewPermissionCache creates a new permission cache with periodic sweep
+// goroutines for all three inner caches. Call Close() on gateway shutdown to
+// stop the sweep goroutines.
 func NewPermissionCache() *PermissionCache {
 	return &PermissionCache{
-		tenantRole:  NewInMemoryCache[string](),
-		agentAccess: NewInMemoryCache[agentAccessEntry](),
-		teamAccess:  NewInMemoryCache[bool](),
+		tenantRole: NewInMemoryCache[string](
+			WithSweepInterval[string](permissionCacheSweepInterval),
+			WithMaxSize[string](permissionCacheMaxSize),
+		),
+		agentAccess: NewInMemoryCache[agentAccessEntry](
+			WithSweepInterval[agentAccessEntry](permissionCacheSweepInterval),
+			WithMaxSize[agentAccessEntry](permissionCacheMaxSize),
+		),
+		teamAccess: NewInMemoryCache[bool](
+			WithSweepInterval[bool](permissionCacheSweepInterval),
+			WithMaxSize[bool](permissionCacheMaxSize),
+		),
 	}
+}
+
+// Close stops all background sweep goroutines. Safe to call multiple times.
+func (pc *PermissionCache) Close() {
+	pc.tenantRole.Close()
+	pc.agentAccess.Close()
+	pc.teamAccess.Close()
 }
 
 const (

@@ -31,8 +31,19 @@ func (s *PruneStage) Result() StageResult { return s.result }
 func (s *PruneStage) Execute(ctx context.Context, state *RunState) error {
 	s.result = Continue
 
-	// Compute budget: context window minus overhead (system prompt + context files) minus output reserve
-	budget := s.deps.Config.ContextWindow - state.Context.OverheadTokens - s.deps.Config.MaxTokens
+	// Compute budget using the effective context window for this run's model.
+	// ContextStage resolves EffectiveContextWindow once per run via ModelRegistry;
+	// if zero (unknown model, registry not wired) fall back to the pipeline-wide
+	// Config.ContextWindow for backward compatibility.
+	//
+	// ReserveTokens (optional, default 0) carves out a safety buffer so compaction
+	// fires slightly before the hard limit — protects against provider over-delivery
+	// and token-counter drift on streaming responses.
+	contextWindow := state.Context.EffectiveContextWindow
+	if contextWindow == 0 {
+		contextWindow = s.deps.Config.ContextWindow
+	}
+	budget := contextWindow - state.Context.OverheadTokens - s.deps.Config.MaxTokens - s.deps.Config.ReserveTokens
 	if budget <= 0 {
 		return nil // no history budget, nothing to prune
 	}

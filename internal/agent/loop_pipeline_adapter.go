@@ -59,6 +59,19 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 			Compaction:         l.compactionCfg,
 			// V3 memory/retrieval flags removed — always true at runtime.
 		},
+		// Resolve per-model context window once per run. Falls back to
+		// Config.ContextWindow when registry/model is unknown (existing
+		// behaviour unchanged for tests and lite edition).
+		ResolveContextWindow: func(provider, model string) int {
+			if l.modelRegistry == nil || model == "" {
+				return 0
+			}
+			spec := l.modelRegistry.Resolve(provider, model)
+			if spec == nil {
+				return 0
+			}
+			return spec.ContextWindow
+		},
 		EmitEvent: func(event any) {
 			if ae, ok := event.(AgentEvent); ok {
 				l.emit(ae)
@@ -233,16 +246,19 @@ func convertRunResult(pr *pipeline.RunResult) *RunResult {
 
 // makeAutoInjectCallback creates the AutoInject callback that captures agent/tenant context.
 // Returns nil if autoInjector is not configured (v3 retrieval disabled or no episodic store).
-func (l *Loop) makeAutoInjectCallback(req *RunRequest) func(ctx context.Context, userMessage, userID string) (string, error) {
+// Phase 9: plumbs recentContext through to enrich vector search queries for
+// context-aware recall.
+func (l *Loop) makeAutoInjectCallback(req *RunRequest) func(ctx context.Context, userMessage, userID, recentContext string) (string, error) {
 	if l.autoInjector == nil {
 		return nil
 	}
-	return func(ctx context.Context, userMessage, userID string) (string, error) {
+	return func(ctx context.Context, userMessage, userID, recentContext string) (string, error) {
 		result, err := l.autoInjector.Inject(ctx, memory.InjectParams{
-			AgentID:     l.agentUUID.String(),
-			UserID:      userID,
-			TenantID:    store.TenantIDFromContext(ctx).String(),
-			UserMessage: userMessage,
+			AgentID:       l.agentUUID.String(),
+			UserID:        userID,
+			TenantID:      store.TenantIDFromContext(ctx).String(),
+			UserMessage:   userMessage,
+			RecentContext: recentContext,
 		})
 		if err != nil || result == nil {
 			return "", err

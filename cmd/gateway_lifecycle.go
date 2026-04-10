@@ -159,6 +159,11 @@ func (d *gatewayDeps) runLifecycle(
 		// Close provider resources (e.g. Claude CLI temp files)
 		d.providerRegistry.Close()
 
+		// Stop permission cache sweep goroutines so they don't leak past shutdown.
+		if d.permCache != nil {
+			d.permCache.Close()
+		}
+
 		// Stop sandbox pruning + release containers
 		if deps.sandboxMgr != nil {
 			deps.sandboxMgr.Stop()
