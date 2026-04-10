@@ -106,10 +106,8 @@ func (w *enrichWorker) classifyLinks(ctx context.Context, tenantID, agentID stri
 			if err := w.vault.DeleteDocLinksByTypes(ctx, tenantID, sourceDocID, allTypes); err != nil {
 				slog.Warn("vault.classify: delete_old", "doc", sourceDocID, "err", err)
 			}
-			for i := range newLinks {
-				if err := w.vault.CreateLink(ctx, &newLinks[i]); err != nil {
-					slog.Debug("vault.classify: create_link", "from", sourceDocID, "to", newLinks[i].ToDocID, "err", err)
-				}
+			if err := w.vault.CreateLinks(ctx, newLinks); err != nil {
+				slog.Debug("vault.classify: batch_create_links", "from", sourceDocID, "count", len(newLinks), "err", err)
 			}
 		}
 	}
@@ -125,10 +123,10 @@ func (w *enrichWorker) gatherCandidates(ctx context.Context, tenantID, agentID s
 			slog.Warn("vault.classify: find_similar", "doc", r.payload.DocID, "err", err)
 			continue
 		}
-		// Derive title from path (payload has no Title field; neighbor docs have it from DB).
-		title := r.payload.Path
-		if doc, err := w.vault.GetDocumentByID(ctx, tenantID, r.payload.DocID); err == nil && doc != nil {
-			title = doc.Title
+		// Use title carried from Phase 0 batch-fetch (avoids per-doc refetch).
+		title := r.title
+		if title == "" {
+			title = r.payload.Path
 		}
 		src := classifyDoc{
 			DocID:   r.payload.DocID,

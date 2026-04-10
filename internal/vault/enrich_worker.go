@@ -111,6 +111,7 @@ func (w *enrichWorker) Handle(ctx context.Context, event eventbus.DomainEvent) e
 type enriched struct {
 	payload eventbus.VaultDocUpsertedPayload
 	summary string
+	title   string // carried from DB for classify phase (avoids refetch)
 }
 
 // processBatch drains and processes queued vault doc events in a loop.
@@ -165,13 +166,16 @@ func (w *enrichWorker) processBatch(ctx context.Context, key string) {
 // processChunk runs the 4-phase enrichment pipeline for a single chunk of docs.
 // Phase 1 batches all files into a single LLM call for summarization.
 func (w *enrichWorker) processChunk(ctx context.Context, items []eventbus.VaultDocUpsertedPayload) {
-	// Phase 0 — Prepare: dedup check, fetch existing doc, read file content.
+	// Phase 0 — Prepare: dedup check, batch-fetch existing docs, read file content.
 	type prepared struct {
 		payload eventbus.VaultDocUpsertedPayload
 		content string // non-empty = needs LLM summarization
 		summary string // non-empty = already summarized, skip LLM
+		title   string // carried from DB for classify phase
 	}
-	var all []prepared
+
+	// Filter dedup'd items first.
+	var pending []eventbus.VaultDocUpsertedPayload
 	for _, item := range items {
 		w.dedupMu.Lock()
 		if prev, exists := w.dedup[item.DocID]; exists && prev == item.ContentHash {
@@ -179,18 +183,37 @@ func (w *enrichWorker) processChunk(ctx context.Context, items []eventbus.VaultD
 			continue
 		}
 		w.dedupMu.Unlock()
+		pending = append(pending, item)
+	}
+	if len(pending) == 0 {
+		return
+	}
 
-		existing, err := w.vault.GetDocumentByID(ctx, item.TenantID, item.DocID)
-		if err != nil {
-			slog.Warn("vault.enrich: get_doc", "doc", item.DocID, "err", err)
-			continue
-		}
+	// Batch-fetch all existing docs in a single query.
+	tenantID := pending[0].TenantID
+	docIDs := make([]string, len(pending))
+	for i, item := range pending {
+		docIDs[i] = item.DocID
+	}
+	existingDocs, err := w.vault.GetDocumentsByIDs(ctx, tenantID, docIDs)
+	if err != nil {
+		slog.Warn("vault.enrich: batch_fetch_docs", "count", len(docIDs), "err", err)
+		return
+	}
+	docMap := make(map[string]*store.VaultDocument, len(existingDocs))
+	for i := range existingDocs {
+		docMap[existingDocs[i].ID] = &existingDocs[i]
+	}
+
+	var all []prepared
+	for _, item := range pending {
+		existing := docMap[item.DocID]
 		if existing != nil && existing.Summary != "" {
-			all = append(all, prepared{payload: item, summary: existing.Summary})
+			all = append(all, prepared{payload: item, summary: existing.Summary, title: existing.Title})
 			continue
 		}
 		if existing != nil && existing.DocType == "media" {
-			all = append(all, prepared{payload: item})
+			all = append(all, prepared{payload: item, title: existing.Title})
 			continue
 		}
 
@@ -204,7 +227,11 @@ func (w *enrichWorker) processChunk(ctx context.Context, items []eventbus.VaultD
 		if len(runes) > enrichBatchItemMaxRunes {
 			runes = runes[:enrichBatchItemMaxRunes]
 		}
-		all = append(all, prepared{payload: item, content: string(runes)})
+		title := ""
+		if existing != nil {
+			title = existing.Title
+		}
+		all = append(all, prepared{payload: item, content: string(runes), title: title})
 	}
 	if len(all) == 0 {
 		return
@@ -235,7 +262,7 @@ func (w *enrichWorker) processChunk(ctx context.Context, items []eventbus.VaultD
 	// Build enriched results.
 	var results []enriched
 	for _, p := range all {
-		results = append(results, enriched{payload: p.payload, summary: p.summary})
+		results = append(results, enriched{payload: p.payload, summary: p.summary, title: p.title})
 	}
 
 	// Phase 2 — Embed: update summary + embed per doc.
