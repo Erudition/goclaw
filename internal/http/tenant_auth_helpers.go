@@ -12,6 +12,12 @@ import (
 // requireTenantAdmin verifies the caller has owner or admin role within the
 // specified tenant. System-wide owners (IsOwnerRole) bypass the check.
 // Returns true if authorized, false if an error response was written.
+//
+// WARNING: the system-owner bypass does NOT guarantee a non-nil tenant ID
+// downstream. A system owner can reach tenant-config handlers with
+// tid == uuid.Nil. Handlers that branch on tenant ID (e.g. emitting
+// tenant-scoped cache invalidate events) must therefore guard against
+// uuid.Nil explicitly — don't rely on this helper to enforce it.
 func requireTenantAdmin(w http.ResponseWriter, r *http.Request, ts store.TenantStore) bool {
 	ctx := r.Context()
 

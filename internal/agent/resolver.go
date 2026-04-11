@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
@@ -506,6 +507,27 @@ func (r *Router) InvalidateAll() {
 	defer r.mu.Unlock()
 	r.agents = make(map[string]*agentEntry)
 	slog.Debug("invalidated all agent caches")
+}
+
+// InvalidateTenant clears all cached agents for a single tenant.
+// Cache keys are "tenantID:agentKey" when tenant-scoped (see agentCacheKey).
+// Non-tenant entries (bare "agentKey") are untouched. uuid.Nil is a no-op —
+// callers use InvalidateAll for global invalidation.
+func (r *Router) InvalidateTenant(tenantID uuid.UUID) {
+	if tenantID == uuid.Nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prefix := tenantID.String() + ":"
+	var deleted int
+	for key := range r.agents {
+		if strings.HasPrefix(key, prefix) {
+			delete(r.agents, key)
+			deleted++
+		}
+	}
+	slog.Debug("invalidated tenant agent cache", "tenant", tenantID, "count", deleted)
 }
 
 // resolveTenantSlug looks up the tenant slug for workspace path resolution.

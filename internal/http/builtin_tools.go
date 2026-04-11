@@ -46,13 +46,19 @@ func (h *BuiltinToolsHandler) adminAuth(next http.HandlerFunc) http.HandlerFunc 
 	return requireAuth(permissions.RoleAdmin, next)
 }
 
-func (h *BuiltinToolsHandler) emitCacheInvalidate(key string) {
+// emitCacheInvalidate broadcasts a cache invalidation event for a builtin tool.
+// tenantID == uuid.Nil means global invalidation (master admin path).
+func (h *BuiltinToolsHandler) emitCacheInvalidate(key string, tenantID uuid.UUID) {
 	if h.msgBus == nil {
 		return
 	}
 	h.msgBus.Broadcast(bus.Event{
-		Name:    protocol.EventCacheInvalidate,
-		Payload: bus.CacheInvalidatePayload{Kind: bus.CacheKindBuiltinTools, Key: key},
+		Name: protocol.EventCacheInvalidate,
+		Payload: bus.CacheInvalidatePayload{
+			Kind:     bus.CacheKindBuiltinTools,
+			Key:      key,
+			TenantID: tenantID,
+		},
 	})
 }
 
@@ -141,7 +147,7 @@ func (h *BuiltinToolsHandler) handleUpdate(w http.ResponseWriter, r *http.Reques
 	}
 
 	emitAudit(h.msgBus, r, "builtin_tool.updated", "builtin_tool", name)
-	h.emitCacheInvalidate(name)
+	h.emitCacheInvalidate(name, uuid.Nil)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -156,6 +162,14 @@ func (h *BuiltinToolsHandler) handleSetTenantConfig(w http.ResponseWriter, r *ht
 	}
 	name := r.PathValue("name")
 	tid := store.TenantIDFromContext(r.Context())
+	if tid == uuid.Nil {
+		// Defense-in-depth: owner-role bypass in requireTenantAdmin could
+		// otherwise reach here without a tenant scope. The DB FK would
+		// reject the write, but we want the guard explicit so a nil tid
+		// never flows into the cache invalidate emit as a global wipe.
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tenant context required"})
+		return
+	}
 
 	var body struct {
 		Enabled bool `json:"enabled"`
@@ -172,6 +186,7 @@ func (h *BuiltinToolsHandler) handleSetTenantConfig(w http.ResponseWriter, r *ht
 	}
 
 	emitAudit(h.msgBus, r, "builtin_tool.tenant_config.set", "builtin_tool", name)
+	h.emitCacheInvalidate(name, tid)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -186,6 +201,10 @@ func (h *BuiltinToolsHandler) handleDeleteTenantConfig(w http.ResponseWriter, r 
 	}
 	name := r.PathValue("name")
 	tid := store.TenantIDFromContext(r.Context())
+	if tid == uuid.Nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tenant context required"})
+		return
+	}
 
 	if err := h.tenantCfgStore.Delete(r.Context(), tid, name); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -193,5 +212,6 @@ func (h *BuiltinToolsHandler) handleDeleteTenantConfig(w http.ResponseWriter, r 
 	}
 
 	emitAudit(h.msgBus, r, "builtin_tool.tenant_config.deleted", "builtin_tool", name)
+	h.emitCacheInvalidate(name, tid)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
