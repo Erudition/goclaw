@@ -141,7 +141,10 @@ func (s *PGVaultStore) UpsertDocument(ctx context.Context, doc *store.VaultDocum
 // Empty agentID means no agent filter (match any agent).
 // Team scoping via RunContext: present+TeamID → filter; present+empty → personal; nil → any match.
 func (s *PGVaultStore) GetDocument(ctx context.Context, tenantID, agentID, path string) (*store.VaultDocument, error) {
-	tid := mustParseUUID(tenantID)
+	tid, err := parseUUID(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("vault get document: tenant: %w", err)
+	}
 
 	q := `SELECT id, tenant_id, agent_id, team_id, scope, custom_scope, path, title, doc_type, content_hash, summary, metadata, created_at, updated_at
 		FROM vault_documents WHERE tenant_id = $1 AND path = $2`
@@ -149,22 +152,30 @@ func (s *PGVaultStore) GetDocument(ctx context.Context, tenantID, agentID, path 
 	p := 3
 
 	if agentID != "" {
+		aid, err := parseUUID(agentID)
+		if err != nil {
+			return nil, fmt.Errorf("vault get document: agent: %w", err)
+		}
 		q += fmt.Sprintf(" AND agent_id = $%d", p)
-		args = append(args, mustParseUUID(agentID))
+		args = append(args, aid)
 		p++
 	}
 
 	if rc := store.RunContextFromCtx(ctx); rc != nil {
 		if rc.TeamID != "" {
+			tmid, err := parseUUID(rc.TeamID)
+			if err != nil {
+				return nil, fmt.Errorf("vault get document: team: %w", err)
+			}
 			q += fmt.Sprintf(" AND team_id = $%d", p)
-			args = append(args, mustParseUUID(rc.TeamID))
+			args = append(args, tmid)
 		} else {
 			q += " AND team_id IS NULL"
 		}
 	}
 
 	var row vaultDocRow
-	err := s.db.QueryRowContext(ctx, q, args...).Scan(
+	err = s.db.QueryRowContext(ctx, q, args...).Scan(
 		&row.ID, &row.TenantID, &row.AgentID, &row.TeamID, &row.Scope, &row.CustomScope,
 		&row.Path, &row.Title, &row.DocType, &row.ContentHash, &row.Summary,
 		&row.MetaJSON, &row.CreatedAt, &row.UpdatedAt)
@@ -177,10 +188,16 @@ func (s *PGVaultStore) GetDocument(ctx context.Context, tenantID, agentID, path 
 
 // GetDocumentByID retrieves a vault document by ID with tenant isolation.
 func (s *PGVaultStore) GetDocumentByID(ctx context.Context, tenantID, id string) (*store.VaultDocument, error) {
-	uid := mustParseUUID(id)
-	tid := mustParseUUID(tenantID)
+	uid, err := parseUUID(id)
+	if err != nil {
+		return nil, fmt.Errorf("vault get document by id: id: %w", err)
+	}
+	tid, err := parseUUID(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("vault get document by id: tenant: %w", err)
+	}
 	var row vaultDocRow
-	err := s.db.QueryRowContext(ctx, `
+	err = s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, agent_id, team_id, scope, custom_scope, path, title, doc_type, content_hash, summary, metadata, created_at, updated_at
 		FROM vault_documents WHERE id = $1 AND tenant_id = $2`, uid, tid,
 	).Scan(&row.ID, &row.TenantID, &row.AgentID, &row.TeamID, &row.Scope, &row.CustomScope,
@@ -199,7 +216,10 @@ func (s *PGVaultStore) GetDocumentsByIDs(ctx context.Context, tenantID string, d
 	if len(docIDs) == 0 {
 		return nil, nil
 	}
-	tid := mustParseUUID(tenantID)
+	tid, err := parseUUID(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("vault get by ids: tenant: %w", err)
+	}
 	const chunkSize = 500
 	var all []store.VaultDocument
 	for start := 0; start < len(docIDs); start += chunkSize {
@@ -221,19 +241,26 @@ func (s *PGVaultStore) GetDocumentsByIDs(ctx context.Context, tenantID string, d
 // GetDocumentByBasename finds a document by path basename (case-insensitive).
 // Uses the stored generated column path_basename + index for fast lookup.
 func (s *PGVaultStore) GetDocumentByBasename(ctx context.Context, tenantID, agentID, basename string) (*store.VaultDocument, error) {
-	tid := mustParseUUID(tenantID)
+	tid, err := parseUUID(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("vault get by basename: tenant: %w", err)
+	}
 	q := `SELECT id, tenant_id, agent_id, team_id, scope, custom_scope, path, title, doc_type, content_hash, summary, metadata, created_at, updated_at
 		FROM vault_documents
 		WHERE tenant_id = $1 AND path_basename = lower($2)`
 	args := []any{tid, basename}
 	p := 3
 	if agentID != "" {
+		aid, err := parseUUID(agentID)
+		if err != nil {
+			return nil, fmt.Errorf("vault get by basename: agent: %w", err)
+		}
 		q += fmt.Sprintf(" AND agent_id = $%d", p)
-		args = append(args, mustParseUUID(agentID))
+		args = append(args, aid)
 	}
 	q += " LIMIT 1"
 	var row vaultDocRow
-	err := s.db.QueryRowContext(ctx, q, args...).Scan(
+	err = s.db.QueryRowContext(ctx, q, args...).Scan(
 		&row.ID, &row.TenantID, &row.AgentID, &row.TeamID, &row.Scope, &row.CustomScope,
 		&row.Path, &row.Title, &row.DocType, &row.ContentHash, &row.Summary,
 		&row.MetaJSON, &row.CreatedAt, &row.UpdatedAt)
@@ -248,34 +275,48 @@ func (s *PGVaultStore) GetDocumentByBasename(ctx context.Context, tenantID, agen
 // Empty agentID means no agent filter.
 // Team scoping via RunContext (same rules as GetDocument).
 func (s *PGVaultStore) DeleteDocument(ctx context.Context, tenantID, agentID, path string) error {
-	tid := mustParseUUID(tenantID)
+	tid, err := parseUUID(tenantID)
+	if err != nil {
+		return fmt.Errorf("vault delete document: tenant: %w", err)
+	}
 
 	q := `DELETE FROM vault_documents WHERE tenant_id = $1 AND path = $2`
 	args := []any{tid, path}
 	p := 3
 
 	if agentID != "" {
+		aid, err := parseUUID(agentID)
+		if err != nil {
+			return fmt.Errorf("vault delete document: agent: %w", err)
+		}
 		q += fmt.Sprintf(" AND agent_id = $%d", p)
-		args = append(args, mustParseUUID(agentID))
+		args = append(args, aid)
 		p++
 	}
 
 	if rc := store.RunContextFromCtx(ctx); rc != nil {
 		if rc.TeamID != "" {
+			tmid, err := parseUUID(rc.TeamID)
+			if err != nil {
+				return fmt.Errorf("vault delete document: team: %w", err)
+			}
 			q += fmt.Sprintf(" AND team_id = $%d", p)
-			args = append(args, mustParseUUID(rc.TeamID))
+			args = append(args, tmid)
 		} else {
 			q += " AND team_id IS NULL"
 		}
 	}
 
-	_, err := s.db.ExecContext(ctx, q, args...)
+	_, err = s.db.ExecContext(ctx, q, args...)
 	return err
 }
 
 // ListDocuments returns vault documents for a tenant+agent with optional filters.
 func (s *PGVaultStore) ListDocuments(ctx context.Context, tenantID, agentID string, opts store.VaultListOptions) ([]store.VaultDocument, error) {
-	tid := mustParseUUID(tenantID)
+	tid, err := parseUUID(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("vault list documents: tenant: %w", err)
+	}
 
 	q := `SELECT id, tenant_id, agent_id, team_id, scope, custom_scope, path, title, doc_type, content_hash, summary, metadata, created_at, updated_at
 		FROM vault_documents WHERE tenant_id = $1`
@@ -284,7 +325,10 @@ func (s *PGVaultStore) ListDocuments(ctx context.Context, tenantID, agentID stri
 
 	// Agent filter is optional — omit for cross-agent listing.
 	if agentID != "" {
-		aid := mustParseUUID(agentID)
+		aid, err := parseUUID(agentID)
+		if err != nil {
+			return nil, fmt.Errorf("vault list documents: agent: %w", err)
+		}
 		q += fmt.Sprintf(" AND agent_id = $%d", p)
 		args = append(args, aid)
 		p++
@@ -330,14 +374,20 @@ func (s *PGVaultStore) ListDocuments(ctx context.Context, tenantID, agentID stri
 
 // CountDocuments returns the total number of vault documents matching the given filters.
 func (s *PGVaultStore) CountDocuments(ctx context.Context, tenantID, agentID string, opts store.VaultListOptions) (int, error) {
-	tid := mustParseUUID(tenantID)
+	tid, err := parseUUID(tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("vault count documents: tenant: %w", err)
+	}
 
 	q := `SELECT COUNT(*) FROM vault_documents WHERE tenant_id = $1`
 	args := []any{tid}
 	p := 2
 
 	if agentID != "" {
-		aid := mustParseUUID(agentID)
+		aid, err := parseUUID(agentID)
+		if err != nil {
+			return 0, fmt.Errorf("vault count documents: agent: %w", err)
+		}
 		q += fmt.Sprintf(" AND agent_id = $%d", p)
 		args = append(args, aid)
 		p++
@@ -362,9 +412,15 @@ func (s *PGVaultStore) CountDocuments(ctx context.Context, tenantID, agentID str
 
 // UpdateHash updates the content hash for a vault document with tenant isolation.
 func (s *PGVaultStore) UpdateHash(ctx context.Context, tenantID, id, newHash string) error {
-	uid := mustParseUUID(id)
-	tid := mustParseUUID(tenantID)
-	_, err := s.db.ExecContext(ctx,
+	uid, err := parseUUID(id)
+	if err != nil {
+		return fmt.Errorf("vault update hash: id: %w", err)
+	}
+	tid, err := parseUUID(tenantID)
+	if err != nil {
+		return fmt.Errorf("vault update hash: tenant: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx,
 		`UPDATE vault_documents SET content_hash = $1, updated_at = $2 WHERE id = $3 AND tenant_id = $4`,
 		newHash, time.Now().UTC(), uid, tid)
 	return err
