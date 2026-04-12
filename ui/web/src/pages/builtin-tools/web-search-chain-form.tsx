@@ -224,6 +224,10 @@ export function WebSearchChainForm({ initialSettings, onSave, onCancel }: Props)
           </SortableContext>
         </DndContext>
         <LockedDuckDuckGoCard settings={initialSettings} />
+
+        <p className="text-xs text-muted-foreground mt-3 px-1">
+          {t("builtin.searchChain.apiKeyHint")}
+        </p>
       </div>
 
       <DialogFooter>

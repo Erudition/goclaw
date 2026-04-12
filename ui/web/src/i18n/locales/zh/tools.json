@@ -70,7 +70,8 @@
         "tavily": "Tavily",
         "brave": "Brave Search",
         "duckduckgo": "DuckDuckGo"
-      }
+      },
+      "apiKeyHint": "Exa、Tavily 和 Brave 的 API Key 在 配置 → Secrets 中管理。没有 Key 的 Provider 将自动跳过。"
     },
     "ttsForm": {
       "title": "TTS 设置",

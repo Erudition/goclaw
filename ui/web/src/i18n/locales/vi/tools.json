@@ -156,7 +156,8 @@
         "tavily": "Tavily",
         "brave": "Brave Search",
         "duckduckgo": "DuckDuckGo"
-      }
+      },
+      "apiKeyHint": "API key cho Exa, Tavily và Brave được quản lý tại Cấu hình → Secrets. Nhà cung cấp không có key sẽ tự động bỏ qua."
     },
     "ttsForm": {
       "title": "Cài đặt TTS",

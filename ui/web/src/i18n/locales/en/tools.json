@@ -156,7 +156,8 @@
         "tavily": "Tavily",
         "brave": "Brave Search",
         "duckduckgo": "DuckDuckGo"
-      }
+      },
+      "apiKeyHint": "API keys for Exa, Tavily, and Brave are managed in Config → Secrets. Providers without a key are skipped automatically."
     },
     "ttsForm": {
       "title": "TTS Settings",
