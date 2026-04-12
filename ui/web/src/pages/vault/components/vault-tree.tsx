@@ -48,7 +48,7 @@ function VaultTreeNode({
   node: TreeNode; depth: number; meta: Map<string, VaultTreeEntry>;
   activePath: string | null; onSelect: (path: string) => void; onLoadMore: (path: string) => void;
 }) {
-  const [expanded, setExpanded] = useState(depth === 0);
+  const [expanded, setExpanded] = useState(false);
   const entry = meta.get(node.path);
 
   const handleToggle = useCallback(() => {
@@ -96,10 +96,12 @@ function VaultTreeNode({
   }
 
   // --- File node (compact single-line) ---
+  // Show filename from path (includes extension), title only in tooltip
   const isActive = activePath === node.path;
   const docType = entry?.docType ?? "";
   const { icon: Icon, color } = DOC_TYPE_ICONS[docType] ?? DEFAULT_ICON;
-  const title = entry?.title || node.name;
+  const fileName = node.name; // basename from path, has extension (e.g. "knowledge_graph.md")
+  const fullTitle = entry?.title || fileName;
   const scopeDot = entry?.scope ? SCOPE_DOT[entry.scope] : null;
   const relTime = entry?.updatedAt ? formatRelativeTime(entry.updatedAt) : null;
 
@@ -115,12 +117,12 @@ function VaultTreeNode({
             onClick={() => onSelect(node.path)}
           >
             <Icon className={`h-3.5 w-3.5 shrink-0 ${color}`} />
-            <span className="truncate text-xs">{truncateMiddle(title)}</span>
+            <span className="truncate text-xs">{truncateMiddle(fileName)}</span>
             {scopeDot && <span className={`ml-auto h-1.5 w-1.5 rounded-full shrink-0 ${scopeDot}`} />}
           </div>
         </TooltipTrigger>
         <TooltipContent side="right" className="text-xs">
-          <p className="font-medium">{title}</p>
+          <p className="font-medium">{fullTitle}</p>
           {relTime && <p className="text-muted-foreground">{relTime}</p>}
           {entry?.scope && <p className="text-muted-foreground capitalize">{entry.scope}</p>}
         </TooltipContent>

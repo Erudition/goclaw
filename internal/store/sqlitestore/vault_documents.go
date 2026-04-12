@@ -470,6 +470,10 @@ func (s *SQLiteVaultStore) ListTreeEntries(ctx context.Context, tenantID string,
 }
 
 func sqliteAppendTreeFilters(q string, args []any, opts store.VaultTreeOptions) (string, []any) {
+	if opts.AgentID != "" {
+		q += " AND agent_id = ?"
+		args = append(args, opts.AgentID)
+	}
 	q, args = sqliteAppendTeamFilter(q, args, opts.TeamID, opts.TeamIDs)
 	if opts.Scope != "" {
 		q += " AND scope = ?"

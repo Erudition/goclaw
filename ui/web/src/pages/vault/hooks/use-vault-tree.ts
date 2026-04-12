@@ -17,6 +17,7 @@ export interface VaultTreeEntry {
 interface VaultTreeResponse { entries: VaultTreeEntry[] }
 
 interface VaultTreeFilter {
+  agent_id?: string;
   scope?: string;
   doc_type?: string;
   team_id?: string;
@@ -38,12 +39,13 @@ export function useVaultTree(filter: VaultTreeFilter = {}) {
     (extraPath?: string): Record<string, string> => {
       const p: Record<string, string> = {};
       if (extraPath) p.path = extraPath;
+      if (filter.agent_id) p.agent_id = filter.agent_id;
       if (filter.scope) p.scope = filter.scope;
       if (filter.doc_type) p.doc_type = filter.doc_type;
       if (filter.team_id) p.team_id = filter.team_id;
       return p;
     },
-    [filter.scope, filter.doc_type, filter.team_id],
+    [filter.agent_id, filter.scope, filter.doc_type, filter.team_id],
   );
 
   const loadRoot = useCallback(async () => {

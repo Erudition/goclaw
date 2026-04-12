@@ -22,6 +22,7 @@ func (h *VaultHandler) handleVaultTree(w http.ResponseWriter, r *http.Request) {
 
 	opts := store.VaultTreeOptions{
 		Path:     path,
+		AgentID:  r.URL.Query().Get("agent_id"),
 		Scope:    r.URL.Query().Get("scope"),
 		DocTypes: splitCSV(r.URL.Query().Get("doc_type")),
 	}

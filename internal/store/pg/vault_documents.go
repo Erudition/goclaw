@@ -768,6 +768,14 @@ func (s *PGVaultStore) ListTreeEntries(ctx context.Context, tenantID string, opt
 }
 
 func appendTreeFilters(q string, args []any, p int, opts store.VaultTreeOptions) (string, []any, int) {
+	if opts.AgentID != "" {
+		aid, err := parseUUID(opts.AgentID)
+		if err == nil {
+			q += fmt.Sprintf(" AND agent_id = $%d", p)
+			args = append(args, aid)
+			p++
+		}
+	}
 	q, args, p = appendTeamFilter(q, args, p, opts.TeamID, opts.TeamIDs)
 	if opts.Scope != "" {
 		q += fmt.Sprintf(" AND scope = $%d", p)

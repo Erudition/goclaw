@@ -7,7 +7,7 @@ import { useHttp } from "@/hooks/use-ws";
 import { useAgents } from "@/pages/agents/hooks/use-agents";
 import { useTeams } from "@/pages/teams/hooks/use-teams";
 import { useIsMobile } from "@/hooks/use-media-query";
-import { useVaultGraphData, useRescanWorkspace } from "./hooks/use-vault";
+import { useRescanWorkspace } from "./hooks/use-vault";
 import { useVaultTree } from "./hooks/use-vault-tree";
 import { useEnrichmentProgress } from "./hooks/use-enrichment-progress";
 import { VaultDocumentSidebar } from "./vault-document-sidebar";
@@ -46,15 +46,13 @@ export function VaultPage() {
   const enriching = enrichment?.running ?? false;
 
   const treeFilter = useMemo(() => ({
+    agent_id: selectedAgent || undefined,
     doc_type: docType || undefined,
     team_id: selectedTeam || undefined,
-  }), [docType, selectedTeam]);
+  }), [selectedAgent, docType, selectedTeam]);
   const { tree, meta, loading, loadRoot, loadSubtree } = useVaultTree(treeFilter);
 
   useEffect(() => { loadRoot(); }, [loadRoot]);
-
-  // Graph data for the graph view panel
-  useVaultGraphData(selectedAgent, { teamId: selectedTeam || undefined });
 
   const handleAgentChange = (v: string) => { setSelectedAgent(v); };
   const handleTeamChange = (v: string) => { setSelectedTeam(v); };

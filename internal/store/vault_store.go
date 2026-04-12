@@ -90,6 +90,7 @@ type VaultTreeEntry struct {
 // VaultTreeOptions configures a vault tree listing query.
 type VaultTreeOptions struct {
 	Path     string
+	AgentID  string   // optional agent filter
 	TeamID   *string
 	TeamIDs  []string
 	Scope    string
