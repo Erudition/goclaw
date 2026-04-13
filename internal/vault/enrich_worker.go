@@ -99,18 +99,20 @@ func (w *EnrichWorker) resolveProviderForTenant(ctx context.Context, tenantID st
 // Stop cancels in-flight enrichment for the given tenant.
 // Safe to call even if no enrichment is running.
 func (w *EnrichWorker) Stop(tenantID string) {
-	if cancel, ok := w.cancelFuncs.Load(tenantID); ok {
+	if cancel, ok := w.cancelFuncs.LoadAndDelete(tenantID); ok {
 		cancel.(context.CancelFunc)()
-		w.cancelFuncs.Delete(tenantID)
-		w.progress.Finish()
-		slog.Info("vault.enrich: stopped by user", "tenant", tenantID)
 	}
+	// Always finish progress — ensures UI resets even if cancelFuncs was empty.
+	w.progress.Finish()
+	slog.Info("vault.enrich: stopped by user", "tenant", tenantID)
 }
 
 // IsRunning returns true if enrichment is in progress for the tenant.
 func (w *EnrichWorker) IsRunning(tenantID string) bool {
-	_, ok := w.cancelFuncs.Load(tenantID)
-	return ok
+	if _, ok := w.cancelFuncs.Load(tenantID); ok {
+		return true
+	}
+	return w.progress.Status().Running
 }
 
 // EnqueueUnenriched fetches documents with empty summary and emits enrichment events.
@@ -127,8 +129,8 @@ func (w *EnrichWorker) EnqueueUnenriched(ctx context.Context, tenantID, workspac
 
 	count := 0
 	for _, doc := range docs {
-		// Skip auto-generated media files — they create noise links.
-		if strings.HasPrefix(filepath.Base(doc.Path), "goclaw_gen_") {
+		// Skip meaningless filenames — they create noise links.
+		if shouldSkipEnrichment(filepath.Base(doc.Path)) {
 			continue
 		}
 		agentID := ""
@@ -178,10 +180,8 @@ func (w *EnrichWorker) Handle(ctx context.Context, event eventbus.DomainEvent) e
 		return nil
 	}
 
-	// Skip auto-generated media files (goclaw_gen_*) — they create excessive
-	// noise links due to similar embeddings. These are typically image outputs
-	// that don't benefit from semantic linking.
-	if basename := filepath.Base(payload.Path); strings.HasPrefix(basename, "goclaw_gen_") {
+	// Skip meaningless filenames — they create noise links.
+	if shouldSkipEnrichment(filepath.Base(payload.Path)) {
 		return nil
 	}
 
@@ -201,7 +201,12 @@ func (w *EnrichWorker) Handle(ctx context.Context, event eventbus.DomainEvent) e
 		return nil // another goroutine already processing this agent's queue
 	}
 
-	w.processBatch(ctx, key)
+	// Create per-tenant cancel context for stop capability.
+	cancelCtx, cancel := context.WithCancel(ctx)
+	w.cancelFuncs.Store(payload.TenantID, cancel)
+	w.processBatch(cancelCtx, key)
+	// Clean up after batch completes naturally.
+	w.cancelFuncs.Delete(payload.TenantID)
 	return nil
 }
 
@@ -217,6 +222,10 @@ type enriched struct {
 // overwhelm the LLM provider with hundreds of concurrent requests.
 func (w *EnrichWorker) processBatch(ctx context.Context, key string) {
 	for {
+		if ctx.Err() != nil {
+			w.queue.TryFinish(key)
+			return
+		}
 		items := w.queue.Drain(key)
 		if len(items) == 0 {
 			if w.queue.TryFinish(key) {
