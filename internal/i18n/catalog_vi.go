@@ -192,5 +192,9 @@ func init() {
 		MsgTenantUserNotFound:  "không tìm thấy tenant user",
 		MsgTenantMismatch:      "tenant user không thuộc tenant này",
 		MsgTenantScopeRequired: "cần xác định tenant để thực hiện thao tác này",
+
+		// TTS / Giọng đọc
+		MsgTtsUnknownModel:  "model tts không hỗ trợ: %s",
+		MsgVoicesListFailed: "không tải được danh sách giọng đọc: %s",
 	})
 }

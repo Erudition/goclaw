@@ -190,6 +190,10 @@ const (
 	// --- Tenants ---
 	MsgInvalidRole = "error.invalid_role" // "invalid role: allowed values are owner, admin, operator, member, viewer"
 
+	// --- TTS / Voices ---
+	MsgTtsUnknownModel   = "error.tts_unknown_model"  // "unknown tts model: %s"
+	MsgVoicesListFailed  = "error.voices_list_failed" // "failed to list voices: %s"
+
 	// --- Contact merge ---
 	MsgContactIDsRequired  = "error.contact_ids_required"  // "contact_ids is required"
 	MsgMergeTargetRequired = "error.merge_target_required"  // "exactly one of tenant_user_id or create_user is required"

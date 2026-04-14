@@ -192,5 +192,9 @@ func init() {
 		MsgTenantUserNotFound:  "未找到租户用户",
 		MsgTenantMismatch:      "租户用户不属于此租户",
 		MsgTenantScopeRequired: "此操作需要指定租户范围",
+
+		// TTS / 声音
+		MsgTtsUnknownModel:  "未知的 tts 模型：%s",
+		MsgVoicesListFailed: "获取声音列表失败：%s",
 	})
 }

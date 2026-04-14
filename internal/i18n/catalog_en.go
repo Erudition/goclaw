@@ -192,5 +192,9 @@ func init() {
 		MsgTenantUserNotFound:  "tenant user not found",
 		MsgTenantMismatch:      "tenant user does not belong to this tenant",
 		MsgTenantScopeRequired: "tenant scope is required for this operation",
+
+		// TTS / Voices
+		MsgTtsUnknownModel:  "unknown tts model: %s",
+		MsgVoicesListFailed: "failed to list voices: %s",
 	})
 }
