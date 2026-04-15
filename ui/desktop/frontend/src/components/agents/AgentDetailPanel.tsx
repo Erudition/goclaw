@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { PersonalitySection } from './PersonalitySection'
 import { ModelBudgetSection } from './ModelBudgetSection'
@@ -16,6 +16,7 @@ import { EvolutionTab } from './evolution-tab'
 import { AgentSkillsSection } from './AgentSkillsSection'
 import { AgentMcpSection } from './AgentMcpSection'
 import { AgentFilesTab } from './AgentFilesTab'
+import { VoicePicker } from './voice-picker'
 import { ConfirmDialog } from '../common/ConfirmDialog'
 import { useAgentDetailState } from '../../hooks/use-agent-detail-state'
 import type { AgentData } from '../../types/agent'
@@ -30,10 +31,31 @@ interface AgentDetailPanelProps {
 }
 
 export function AgentDetailPanel({ agent, onSave, onResummon, onClose }: AgentDetailPanelProps) {
-  const { t } = useTranslation(['agents', 'common'])
+  const { t } = useTranslation(['agents', 'common', 'tts'])
   const [tab, setTab] = useState<DetailTab>('overview')
   const [confirmResummon, setConfirmResummon] = useState(false)
-  const s = useAgentDetailState(agent, onSave, onClose)
+  const [ttsVoiceId, setTtsVoiceId] = useState<string | null>(
+    (agent.other_config?.tts_voice_id as string) ?? null,
+  )
+  const ttsVoiceIdRef = useRef(ttsVoiceId)
+  ttsVoiceIdRef.current = ttsVoiceId
+
+  // Wrap onSave to merge tts_voice_id into other_config at save time
+  const onSaveWithVoice = useCallback(async (id: string, updates: Partial<AgentData>) => {
+    const merged = { ...updates }
+    const existing = (merged.other_config ?? {}) as Record<string, unknown>
+    const voiceId = ttsVoiceIdRef.current
+    if (voiceId) {
+      merged.other_config = { ...existing, tts_voice_id: voiceId }
+    } else {
+      const { tts_voice_id: _removed, ...rest } = existing
+      void _removed
+      merged.other_config = Object.keys(rest).length > 0 ? rest : null
+    }
+    await onSave(id, merged)
+  }, [onSave])
+
+  const s = useAgentDetailState(agent, onSaveWithVoice, onClose)
   const isPredefined = agent.agent_type === 'predefined'
 
   const handleConfirmResummon = async () => {
@@ -161,6 +183,14 @@ export function AgentDetailPanel({ agent, onSave, onResummon, onClose }: AgentDe
             <AgentSkillsSection agentId={agent.id} />
             <hr className="border-border" />
             <AgentMcpSection agentId={agent.id} />
+            <hr className="border-border" />
+            {/* TTS Voice section */}
+            <div className="space-y-2">
+              <p className="text-xs font-semibold text-text-primary uppercase tracking-wide">
+                {t('tts:voice_label')}
+              </p>
+              <VoicePicker value={ttsVoiceId} onChange={setTtsVoiceId} />
+            </div>
           </div>
         ) : (
           <div className="max-w-4xl mx-auto px-4 py-6">
