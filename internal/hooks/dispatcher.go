@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -322,13 +323,21 @@ func applyBuiltinMutation(ev *Event, updated map[string]any, allowlist []string)
 // (cmd/gateway_managed.go calls SetBuiltinAllowlistLookup(builtin.AllowlistFor)).
 // When nil (tests that don't wire the registry) we fall back to the Phase 03
 // permissive default so legacy mutation tests stay green.
-var builtinAllowlistLookup func(id uuid.UUID) []string
+//
+// atomic.Pointer guards against the data race that fires when parallel tests
+// install/clear the lookup while the dispatcher reads it on another goroutine.
+var builtinAllowlistLookup atomic.Pointer[func(uuid.UUID) []string]
 
 // SetBuiltinAllowlistLookup installs the per-id allowlist function. Called
 // once at startup from cmd/gateway_managed.go. Safe to leave unset in tests —
-// callers get the permissive default (rawInput + toolInput) below.
+// callers get the permissive default (rawInput + toolInput) below. Pass nil
+// to clear (used by `defer` cleanup in tests).
 func SetBuiltinAllowlistLookup(f func(uuid.UUID) []string) {
-	builtinAllowlistLookup = f
+	if f == nil {
+		builtinAllowlistLookup.Store(nil)
+		return
+	}
+	builtinAllowlistLookup.Store(&f)
 }
 
 // builtinAllowlistFor returns the field allowlist for a builtin hook row.
@@ -336,8 +345,8 @@ func SetBuiltinAllowlistLookup(f func(uuid.UUID) []string) {
 // → empty allowlist (mutations stripped, defense-in-depth). Unset lookup
 // (unit tests) → Phase 03 permissive default.
 func builtinAllowlistFor(id uuid.UUID) []string {
-	if builtinAllowlistLookup != nil {
-		return builtinAllowlistLookup(id)
+	if fp := builtinAllowlistLookup.Load(); fp != nil {
+		return (*fp)(id)
 	}
 	return []string{"rawInput", "toolInput"}
 }

@@ -211,13 +211,40 @@ func (h *ScriptHandler) Execute(ctx context.Context, cfg hooks.HookConfig, ev ho
 	return dec, nil
 }
 
+// tenantSlotIdleTimeout is how long a per-tenant semaphore can sit unused
+// before it becomes eligible for sweep. Picked at 1h: long enough to cover
+// idle gaps between user sessions; short enough that long-running multi-tenant
+// gateways with churning tenants don't accumulate dead entries forever.
+const tenantSlotIdleTimeout = 1 * time.Hour
+
+// tenantSemSweepThreshold defers sweep cost until the map is large enough to
+// matter. Below this, the O(N) scan per acquire is wasted work.
+const tenantSemSweepThreshold = 64
+
 // acquireTenantSem returns the per-tenant slot channel, lazily allocating on
 // first use. Zero-UUID tenants (system calls) share the same slot keyed by
 // uuid.Nil, which is acceptable because system-source hooks are still bounded
 // by the global cap.
+//
+// Sweep: when the map crosses tenantSemSweepThreshold entries, idle slots
+// (no in-flight grants AND last-used > tenantSlotIdleTimeout ago) are dropped
+// opportunistically. Goroutine-free design — sweep happens under the same
+// lock the acquire path already takes, so steady-state cost stays one
+// CompareAndSwap-equivalent for the common path.
 func (h *ScriptHandler) acquireTenantSem(tid uuid.UUID) chan struct{} {
 	h.tenantMu.Lock()
 	defer h.tenantMu.Unlock()
+	if len(h.tenantSems) >= tenantSemSweepThreshold {
+		now := time.Now()
+		for k, v := range h.tenantSems {
+			if k == tid {
+				continue
+			}
+			if len(v.sem) == 0 && now.Sub(v.lastUsed) > tenantSlotIdleTimeout {
+				delete(h.tenantSems, k)
+			}
+		}
+	}
 	s, ok := h.tenantSems[tid]
 	if !ok {
 		s = &tenantSlot{sem: make(chan struct{}, h.perTenantCap)}
