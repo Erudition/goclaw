@@ -242,11 +242,17 @@ func (t *TtsTool) Execute(ctx context.Context, args map[string]any) *Result {
 	// Set Result.Media explicitly (matching create_audio) so the agent loop's
 	// media collector uses the authoritative path even when the ForLLM
 	// MEDIA: prefix is reshaped by a provider bridge (e.g. claude_cli MCP).
+	// Prefer the provider-supplied MimeType ("audio/mpeg", "audio/ogg") over
+	// "audio/"+Extension — the latter yields the non-standard "audio/mp3".
+	mimeType := result.MimeType
+	if mimeType == "" {
+		mimeType = "audio/" + result.Extension
+	}
 	r := &Result{
 		ForLLM: forLLM,
 		Media: []bus.MediaFile{{
 			Path:     audioPath,
-			MimeType: "audio/" + result.Extension,
+			MimeType: mimeType,
 		}},
 	}
 	r.Deliverable = fmt.Sprintf("[Generated audio: %s]\nText: %s", filepath.Base(audioPath), text)

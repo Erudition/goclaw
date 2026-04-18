@@ -20,7 +20,13 @@ func writeTempFile(t *testing.T, workspace, relPath string) string {
 }
 
 func TestExtractMediaFromContent(t *testing.T) {
-	ws := t.TempDir()
+	wsRaw := t.TempDir()
+	// Resolve workspace symlinks up front (macOS has /var → /private/var) so
+	// expected paths match what the extractor returns after EvalSymlinks.
+	ws, err := filepath.EvalSymlinks(wsRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
 	reportPath := writeTempFile(t, ws, "deliver/report.pdf")
 	audioA := writeTempFile(t, ws, "a.mp3")
 	audioB := writeTempFile(t, ws, "b.mp3")
@@ -31,6 +37,23 @@ func TestExtractMediaFromContent(t *testing.T) {
 	outsidePath := filepath.Join(outsideDir, "leak.pdf")
 	if err := os.WriteFile(outsidePath, nil, 0o644); err != nil {
 		t.Fatal(err)
+	}
+
+	// Symlink inside workspace pointing to outside: must be rejected by
+	// EvalSymlinks-then-Rel containment. Covers the P0 ancestor-symlink
+	// escape the lexical-only Rel check would have allowed.
+	symlinkFile := filepath.Join(ws, "shortcut-to-leak.pdf")
+	if err := os.Symlink(outsidePath, symlinkFile); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	// Ancestor symlink case: dir symlink inside ws pointing outside.
+	symDirParent := t.TempDir()
+	if err := os.WriteFile(filepath.Join(symDirParent, "victim.pdf"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ancestorSym := filepath.Join(ws, "shared")
+	if err := os.Symlink(symDirParent, ancestorSym); err != nil {
+		t.Skipf("symlink not supported: %v", err)
 	}
 
 	tests := []struct {
@@ -83,6 +106,16 @@ func TestExtractMediaFromContent(t *testing.T) {
 		{
 			name:    "absolute path with no workspace dropped",
 			content: "MEDIA:" + reportPath,
+		},
+		{
+			name:      "symlink leaf rejected by Lstat",
+			content:   "MEDIA:shortcut-to-leak.pdf",
+			workspace: ws,
+		},
+		{
+			name:      "ancestor symlink escape blocked (P0)",
+			content:   "MEDIA:shared/victim.pdf",
+			workspace: ws,
 		},
 	}
 	for _, tt := range tests {

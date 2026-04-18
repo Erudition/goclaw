@@ -65,9 +65,17 @@ func extractMediaFromContent(content, workspace string) []MediaResult {
 	if len(matches) == 0 {
 		return nil
 	}
+	// Resolve workspace to its real path (follows symlinks). Required because
+	// macOS uses symlinks for /tmp → /private/tmp; if we only Clean the
+	// workspace but EvalSymlinks the extracted paths, the Rel check below
+	// would spuriously fail even for legitimate files.
 	wsRoot := ""
 	if abs, err := filepath.Abs(workspace); err == nil {
-		wsRoot = filepath.Clean(abs)
+		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+			wsRoot = filepath.Clean(resolved)
+		} else {
+			wsRoot = filepath.Clean(abs)
+		}
 	}
 	if wsRoot == "" {
 		return nil
@@ -90,18 +98,24 @@ func extractMediaFromContent(content, workspace string) []MediaResult {
 			path = filepath.Join(wsRoot, path)
 		}
 		cleaned := filepath.Clean(path)
-		// Workspace containment check — blocks "../" escapes and absolute paths
-		// outside the agent's allowed area.
-		rel, err := filepath.Rel(wsRoot, cleaned)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			continue
-		}
-		// Existence + regular-file check prevents hallucinated paths and
-		// directory/symlink-device shenanigans from reaching the outbound queue.
+		// Existence + regular-file check. Lstat (not Stat) so a symlink at
+		// the leaf is rejected outright.
 		info, err := os.Lstat(cleaned)
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
+		// Resolve ancestor symlinks THEN check containment. A purely lexical
+		// Rel check would pass "<ws>/<symlink-dir>/secret" when symlink-dir
+		// points outside the workspace; EvalSymlinks closes that escape.
+		resolved, err := filepath.EvalSymlinks(cleaned)
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(wsRoot, resolved)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		cleaned = resolved
 		if _, dup := seen[cleaned]; dup {
 			continue
 		}
@@ -114,7 +128,12 @@ func extractMediaFromContent(content, workspace string) []MediaResult {
 	return results
 }
 
-// deduplicateMedia removes duplicate media results by path, keeping the first occurrence.
+// deduplicateMedia removes duplicate media results, normalizing each path
+// so legacy entries from parseMediaResult (raw tool output — may contain
+// "./" segments or relative forms) collapse cleanly with entries from
+// extractMediaFromContent (already Clean'd + Abs'd). Prevents double-send
+// when a tool returns MEDIA:./x.mp3 and the LLM echoes it back in a form
+// that resolves to the same file.
 func deduplicateMedia(media []MediaResult) []MediaResult {
 	if len(media) <= 1 {
 		return media
@@ -122,10 +141,16 @@ func deduplicateMedia(media []MediaResult) []MediaResult {
 	seen := make(map[string]bool, len(media))
 	result := make([]MediaResult, 0, len(media))
 	for _, m := range media {
-		if seen[m.Path] {
+		key := m.Path
+		if abs, err := filepath.Abs(key); err == nil {
+			key = filepath.Clean(abs)
+		} else {
+			key = filepath.Clean(key)
+		}
+		if seen[key] {
 			continue
 		}
-		seen[m.Path] = true
+		seen[key] = true
 		result = append(result, m)
 	}
 	return result
