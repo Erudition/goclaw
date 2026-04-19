@@ -100,16 +100,14 @@ All four filesystem tools (`read_file`, `write_file`, `list_files`, `edit`) impl
 | **Deny patterns** | Per-binary regex deny lists on arguments + verbose flags | Sensitive operations per CLI (e.g., `auth`, `ssh-key`) |
 | **Output scrub** | Credential values registered for dynamic scrubbing | Credentials in stdout/stderr |
 
-**Edge case mitigations** (13 scenarios analyzed):
-- Shell operators in command string → Blocked by early regex scan
-- Argument injection via spaces → Protected by shell-word parsing (not shell evaluation)
-- Binary PATH manipulation → Absolute path required + config match
-- Symlink attacks → Verified by `exec.LookPath()` + config match
-- Env var exfiltration → Command runs without shell, env vars never expand
-- Output parsing tricks → Dynamic scrubbing catches all registered credential values
-- Timeout abuse → Configurable per-binary timeout with context deadline
-- Sandbox escape → Docker container isolation if sandbox enabled
-- Verbose flag leakage → Separate deny_verbose list blocks verbose/debug output
+| Attack Surface | Mitigation |
+|----------------|------------|
+| Shell operator injection, argument injection via spaces | Early regex scan + shell-word parsing (no shell evaluation) |
+| Binary PATH manipulation, symlink attacks | `exec.LookPath()` + absolute path required + config match |
+| Env var exfiltration, output parsing tricks | No-shell exec (env vars never expand) + dynamic credential scrubbing |
+| Timeout abuse | Configurable per-binary timeout with context deadline |
+| Sandbox escape | Docker container isolation when sandbox enabled |
+| Verbose flag leakage | Separate deny_verbose list blocks verbose/debug output |
 
 **Agent-level grant enforcement** -- The gate runs **before** any process spawn, blocking ungranted agents from executing registered binaries:
 

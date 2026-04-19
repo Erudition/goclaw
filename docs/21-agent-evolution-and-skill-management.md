@@ -133,14 +133,7 @@ No skill is created without explicit user approval ("save as skill" or "skip").
 
 Both stored in `agents.other_config` JSONB. Parsed by `ParseSkillEvolve()` and `ParseSkillNudgeInterval()` in `agent_store.go`.
 
-**Predefined agents only.** Enforced at resolver level:
-
-```go
-// resolver.go:346
-SkillEvolve: ag.AgentType == "predefined" && ag.ParseSkillEvolve(),
-```
-
-Open agents always get `skillEvolve=false` regardless of DB setting.
+**Predefined agents only.** Enforced at the resolver level: `SkillEvolve` is set to `true` only when `AgentType == "predefined"` and the `skill_evolve` config flag is enabled. Open agents always get `skillEvolve=false` regardless of DB setting.
 
 **UI:** Config tab → Skill Learning section (toggle + interval input).
 
@@ -254,8 +247,8 @@ reusable skill? Reply "save as skill" or "skip"._
 
 When `skill_evolve=false`, `skill_manage` is completely hidden from the LLM:
 
-1. **API params** (`loop.go:528-537`): filtered from `toolDefs` before sending to provider
-2. **System prompt tooling** (`loop_history.go:135-144`): filtered from `toolNames` used in prompt construction
+1. **API params**: filtered from `toolDefs` before sending to provider
+2. **System prompt tooling**: filtered from `toolNames` used in prompt construction
 
 The tool remains in the shared registry (admin can see it) but the agent has zero awareness of it.
 

@@ -30,7 +30,7 @@ Or in WebSocket `connect`:
 
 ### Security
 
-The gateway token is compared using **constant-time comparison** (`crypto/subtle.ConstantTimeCompare`) in both HTTP (`auth.go:tokenMatch`) and WebSocket (`router.go:handleConnect`) to prevent timing attacks. The comparison reveals no information about where the provided token first differs from the expected token.
+The gateway token is compared using **constant-time comparison** (`crypto/subtle.ConstantTimeCompare`) in both HTTP and WebSocket auth paths to prevent timing attacks. The comparison reveals no information about where the provided token first differs from the expected token.
 
 ---
 
@@ -78,7 +78,7 @@ Each API key is assigned one or more scopes that determine what operations it ca
 
 ### Role Derivation
 
-The highest-privilege scope determines the effective role via `RoleFromScopes()` in `permissions/policy.go`:
+The highest-privilege scope determines the effective role:
 
 ```
 if admin scope present           → RoleAdmin
