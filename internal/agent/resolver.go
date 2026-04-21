@@ -58,6 +58,7 @@ type ResolverDeps struct {
 	CompactionCfg          *config.CompactionConfig
 	ContextPruningCfg      *config.ContextPruningConfig
 	SandboxEnabled         bool
+	SandboxNetworkEnabled  bool
 	SandboxContainerDir    string
 	SandboxWorkspaceAccess string
 
@@ -250,6 +251,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			contextPruningCfg = c
 		}
 		sandboxEnabled := deps.SandboxEnabled
+		sandboxNetworkEnabled := deps.SandboxNetworkEnabled
 		sandboxContainerDir := deps.SandboxContainerDir
 		sandboxWorkspaceAccess := deps.SandboxWorkspaceAccess
 		var sandboxCfgOverride *sandbox.Config
@@ -257,6 +259,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			resolved := c.ToSandboxConfig()
 			sandboxContainerDir = resolved.ContainerWorkdir()
 			sandboxWorkspaceAccess = string(resolved.WorkspaceAccess)
+			sandboxNetworkEnabled = resolved.NetworkEnabled
 			sandboxCfgOverride = &resolved
 		}
 
@@ -505,6 +508,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			CompactionCfg:          compactionCfg,
 			ContextPruningCfg:      contextPruningCfg,
 			SandboxEnabled:         sandboxEnabled,
+			SandboxNetworkEnabled:  sandboxNetworkEnabled,
 			SandboxContainerDir:    sandboxContainerDir,
 			SandboxWorkspaceAccess: sandboxWorkspaceAccess,
 			BuiltinToolSettings:    builtinSettings,
