@@ -105,7 +105,7 @@ export function ChatPage() {
       if (parsed) setAgentIdFallback(parsed);
       navigate(`/chat/${encodeURIComponent(key)}`);
     },
-    [navigate],
+    [navigate, setAgentIdFallback],
   );
 
   const handleDeleteSession = useCallback(async (key: string) => {
@@ -125,7 +125,7 @@ export function ChatPage() {
       setAgentIdFallback(newAgentId);
       navigate(`/chat/${encodeURIComponent(`agent:${newAgentId}:ws:direct:${uniqueId()}`)}`);
     },
-    [navigate],
+    [navigate, setAgentIdFallback],
   );
 
   const handleSend = useCallback(
