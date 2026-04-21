@@ -10,11 +10,9 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
 
-// toolGroupsMu protects toolGroups from concurrent access.
-var toolGroupsMu sync.RWMutex
-
-// Tool groups map group names to tool names.
-var toolGroups = map[string][]string{
+// builtinToolGroups is const-like seed data for per-Registry tool groups.
+// Do NOT modify at runtime — each Registry gets a deep copy in NewRegistry().
+var builtinToolGroups = map[string][]string{
 	"memory":     {"memory_search", "memory_get"},
 	"web":        {"web_search", "web_fetch"},
 	"fs":         {"read_file", "write_file", "list_files", "edit"},
@@ -28,30 +26,22 @@ var toolGroups = map[string][]string{
 	"goclaw": {
 		"read_file", "write_file", "list_files", "edit", "exec",
 		"web_search", "web_fetch", "browser",
-		"memory_search", "memory_get",
+		"memory_search", "memory_get", "memory_expand",
+		"knowledge_graph_search", "vault_search", "vault_read",
 		"sessions_list", "sessions_history", "sessions_send", "spawn", "session_status",
-		"cron", "message", "create_forum_topic", "list_group_members",
+		"delegate",
+		"cron", "datetime", "heartbeat",
+		"message", "create_forum_topic", "list_group_members",
 		"read_image", "read_document", "read_audio", "read_video",
-		"create_image", "create_video",
-		"skill_search", "mcp_tool_search", "tts",
+		"create_image", "create_video", "create_audio",
+		"skill_search", "skill_manage", "publish_skill", "use_skill",
+		"mcp_tool_search", "tts",
 		"team_tasks",
 	},
 }
 
-// RegisterToolGroup adds or replaces a dynamic tool group.
-// Used by the MCP manager to register "mcp" and "mcp:{serverName}" groups.
-func RegisterToolGroup(name string, members []string) {
-	toolGroupsMu.Lock()
-	toolGroups[name] = members
-	toolGroupsMu.Unlock()
-}
-
-// UnregisterToolGroup removes a dynamic tool group.
-func UnregisterToolGroup(name string) {
-	toolGroupsMu.Lock()
-	delete(toolGroups, name)
-	toolGroupsMu.Unlock()
-}
+// Package-level wrappers are REMOVED — use Registry methods instead.
+// See Registry.RegisterToolGroup, Registry.MergeToolGroup, Registry.UnregisterToolGroup.
 
 // Tool profiles define preset allow sets.
 var toolProfiles = map[string][]string{
@@ -89,12 +79,30 @@ var leafSubagentDenyList = []string{
 
 // PolicyEngine evaluates tool access based on layered config policies.
 type PolicyEngine struct {
-	globalPolicy *config.ToolsConfig
+	globalPolicy     *config.ToolsConfig
+	mu               sync.RWMutex     // protects denyCapabilities + registry
+	denyCapabilities []ToolCapability // capability-based deny rules (v3)
+	registry         *Registry        // for metadata lookups (nil = skip capability checks)
 }
 
 // NewPolicyEngine creates a policy engine from global config.
 func NewPolicyEngine(cfg *config.ToolsConfig) *PolicyEngine {
 	return &PolicyEngine{globalPolicy: cfg}
+}
+
+// SetRegistry enables capability-based filtering by providing metadata lookups.
+func (pe *PolicyEngine) SetRegistry(r *Registry) {
+	pe.mu.Lock()
+	defer pe.mu.Unlock()
+	pe.registry = r
+}
+
+// DenyCapability adds a capability to the deny list.
+// Tools with this capability are excluded from FilterTools results.
+func (pe *PolicyEngine) DenyCapability(cap ToolCapability) {
+	pe.mu.Lock()
+	defer pe.mu.Unlock()
+	pe.denyCapabilities = append(pe.denyCapabilities, cap)
 }
 
 // FilterTools returns only the tools allowed by the policy for the given context.
@@ -110,6 +118,15 @@ func (pe *PolicyEngine) FilterTools(
 ) []providers.ToolDefinition {
 	allTools := registry.List()
 	allowed := pe.evaluate(allTools, providerName, agentToolPolicy, groupToolAllow)
+
+	// Step 8: Capability-based deny (v3 RBAC)
+	pe.mu.RLock()
+	denyCaps := pe.denyCapabilities
+	capReg := pe.registry
+	pe.mu.RUnlock()
+	if len(denyCaps) > 0 && capReg != nil {
+		allowed = filterByCapability(allowed, denyCaps, capReg)
+	}
 
 	// Apply subagent restrictions
 	if isSubagent {
@@ -130,8 +147,16 @@ func (pe *PolicyEngine) FilterTools(
 		}
 	}
 
-	// Add registry aliases for allowed canonical tools
-	for alias, canonical := range registry.Aliases() {
+	// Add registry aliases for allowed canonical tools.
+	// Sort alias names for deterministic ordering (prompt caching).
+	aliasMap := registry.Aliases()
+	aliasList := make([]string, 0, len(aliasMap))
+	for alias := range aliasMap {
+		aliasList = append(aliasList, alias)
+	}
+	slices.Sort(aliasList)
+	for _, alias := range aliasList {
+		canonical := aliasMap[alias]
 		if !allowedSet[canonical] {
 			continue
 		}
@@ -167,6 +192,11 @@ func (pe *PolicyEngine) evaluate(
 ) []string {
 	g := pe.globalPolicy
 
+	// Get registry for group expansion (may be nil in early boot)
+	pe.mu.RLock()
+	reg := pe.registry
+	pe.mu.RUnlock()
+
 	// Step 1: Global profile
 	allowed := pe.applyProfile(allTools, g.Profile)
 
@@ -179,49 +209,49 @@ func (pe *PolicyEngine) evaluate(
 
 	// Step 3: Global allow list (restricts to only these)
 	if len(g.Allow) > 0 {
-		allowed = intersectWithSpec(allowed, g.Allow)
+		allowed = intersectWithSpec(reg, allowed, g.Allow)
 	}
 
 	// Step 4: Provider-level allow override
 	if g.ByProvider != nil {
 		if pp, ok := g.ByProvider[providerName]; ok && len(pp.Allow) > 0 {
-			allowed = intersectWithSpec(allowed, pp.Allow)
+			allowed = intersectWithSpec(reg, allowed, pp.Allow)
 		}
 	}
 
 	// Step 5: Per-agent allow
 	if agentToolPolicy != nil && len(agentToolPolicy.Allow) > 0 {
-		allowed = intersectWithSpec(allowed, agentToolPolicy.Allow)
+		allowed = intersectWithSpec(reg, allowed, agentToolPolicy.Allow)
 	}
 
 	// Step 6: Per-agent per-provider allow
 	if agentToolPolicy != nil && agentToolPolicy.ByProvider != nil {
 		if pp, ok := agentToolPolicy.ByProvider[providerName]; ok && len(pp.Allow) > 0 {
-			allowed = intersectWithSpec(allowed, pp.Allow)
+			allowed = intersectWithSpec(reg, allowed, pp.Allow)
 		}
 	}
 
 	// Step 7: Group-level allow
 	if len(groupToolAllow) > 0 {
-		allowed = intersectWithSpec(allowed, groupToolAllow)
+		allowed = intersectWithSpec(reg, allowed, groupToolAllow)
 	}
 
 	// Apply global deny
 	if len(g.Deny) > 0 {
-		allowed = subtractSpec(allowed, g.Deny)
+		allowed = subtractSpec(reg, allowed, g.Deny)
 	}
 
 	// Apply agent deny
 	if agentToolPolicy != nil && len(agentToolPolicy.Deny) > 0 {
-		allowed = subtractSpec(allowed, agentToolPolicy.Deny)
+		allowed = subtractSpec(reg, allowed, agentToolPolicy.Deny)
 	}
 
 	// Apply alsoAllow (additive — adds back tools without removing existing)
 	if len(g.AlsoAllow) > 0 {
-		allowed = unionWithSpec(allowed, allTools, g.AlsoAllow)
+		allowed = unionWithSpec(reg, allowed, allTools, g.AlsoAllow)
 	}
 	if agentToolPolicy != nil && len(agentToolPolicy.AlsoAllow) > 0 {
-		allowed = unionWithSpec(allowed, allTools, agentToolPolicy.AlsoAllow)
+		allowed = unionWithSpec(reg, allowed, allTools, agentToolPolicy.AlsoAllow)
 	}
 
 	return allowed
@@ -240,31 +270,34 @@ func (pe *PolicyEngine) applyProfile(allTools []string, profile string) []string
 		return copySlice(allTools)
 	}
 
-	return expandSpec(allTools, spec)
+	// Get registry for group expansion
+	pe.mu.RLock()
+	reg := pe.registry
+	pe.mu.RUnlock()
+
+	return expandSpec(reg, allTools, spec)
 }
 
-// --- Set operations with group expansion ---
+// --- Set operations with group expansion (using per-Registry tool groups) ---
 
 // expandSpec expands a spec list (which may contain "group:xxx") into concrete tool names,
-// filtered against available tools.
-func expandSpec(available []string, spec []string) []string {
-	toolGroupsMu.RLock()
-	defer toolGroupsMu.RUnlock()
+// filtered against available tools. Uses per-Registry tool groups to avoid cross-agent races.
+func expandSpec(reg *Registry, available []string, spec []string) []string {
+	if reg == nil {
+		// Fallback: no group expansion
+		return expandSpecNoGroups(available, spec)
+	}
+	return reg.ExpandToolGroups(available, spec)
+}
 
+// expandSpecNoGroups is a fallback when no registry is available.
+func expandSpecNoGroups(available []string, spec []string) []string {
 	expanded := make(map[string]bool)
 	for _, s := range spec {
-		if after, ok := strings.CutPrefix(s, "group:"); ok {
-			groupName := after
-			if members, ok := toolGroups[groupName]; ok {
-				for _, m := range members {
-					expanded[m] = true
-				}
-			}
-		} else {
+		if !strings.HasPrefix(s, "group:") {
 			expanded[s] = true
 		}
 	}
-
 	var result []string
 	for _, t := range available {
 		if expanded[t] {
@@ -275,15 +308,17 @@ func expandSpec(available []string, spec []string) []string {
 }
 
 // intersectWithSpec keeps only tools in `current` that match the spec (with group expansion).
-func intersectWithSpec(current []string, spec []string) []string {
-	toolGroupsMu.RLock()
-	defer toolGroupsMu.RUnlock()
+func intersectWithSpec(reg *Registry, current []string, spec []string) []string {
+	if reg == nil {
+		return intersectWithSpecNoGroups(current, spec)
+	}
+	reg.toolGroupsMu.RLock()
+	defer reg.toolGroupsMu.RUnlock()
 
 	expanded := make(map[string]bool)
 	for _, s := range spec {
 		if after, ok := strings.CutPrefix(s, "group:"); ok {
-			groupName := after
-			if members, ok := toolGroups[groupName]; ok {
+			if members, ok := reg.toolGroups[after]; ok {
 				for _, m := range members {
 					expanded[m] = true
 				}
@@ -302,16 +337,34 @@ func intersectWithSpec(current []string, spec []string) []string {
 	return result
 }
 
+func intersectWithSpecNoGroups(current []string, spec []string) []string {
+	expanded := make(map[string]bool)
+	for _, s := range spec {
+		if !strings.HasPrefix(s, "group:") {
+			expanded[s] = true
+		}
+	}
+	var result []string
+	for _, t := range current {
+		if expanded[t] {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
 // subtractSpec removes tools matching the spec (with group expansion) from current.
-func subtractSpec(current []string, spec []string) []string {
-	toolGroupsMu.RLock()
-	defer toolGroupsMu.RUnlock()
+func subtractSpec(reg *Registry, current []string, spec []string) []string {
+	if reg == nil {
+		return subtractSpecNoGroups(current, spec)
+	}
+	reg.toolGroupsMu.RLock()
+	defer reg.toolGroupsMu.RUnlock()
 
 	denied := make(map[string]bool)
 	for _, s := range spec {
 		if after, ok := strings.CutPrefix(s, "group:"); ok {
-			groupName := after
-			if members, ok := toolGroups[groupName]; ok {
+			if members, ok := reg.toolGroups[after]; ok {
 				for _, m := range members {
 					denied[m] = true
 				}
@@ -321,6 +374,22 @@ func subtractSpec(current []string, spec []string) []string {
 		}
 	}
 
+	var result []string
+	for _, t := range current {
+		if !denied[t] {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+func subtractSpecNoGroups(current []string, spec []string) []string {
+	denied := make(map[string]bool)
+	for _, s := range spec {
+		if !strings.HasPrefix(s, "group:") {
+			denied[s] = true
+		}
+	}
 	var result []string
 	for _, t := range current {
 		if !denied[t] {
@@ -346,13 +415,13 @@ func subtractSet(current []string, deny []string) []string {
 }
 
 // unionWithSpec adds tools matching spec (from allTools) to current set.
-func unionWithSpec(current []string, allTools []string, spec []string) []string {
+func unionWithSpec(reg *Registry, current []string, allTools []string, spec []string) []string {
 	existing := make(map[string]bool, len(current))
 	for _, t := range current {
 		existing[t] = true
 	}
 
-	toAdd := expandSpec(allTools, spec)
+	toAdd := expandSpec(reg, allTools, spec)
 	for _, t := range toAdd {
 		if !existing[t] {
 			current = append(current, t)
@@ -365,13 +434,17 @@ func unionWithSpec(current []string, allTools []string, spec []string) []string 
 // IsDenied checks if a tool name is explicitly denied by global or agent policy.
 // Used to prevent lazy-activated deferred tools from bypassing the deny list.
 func (pe *PolicyEngine) IsDenied(name string, agentPolicy *config.ToolPolicySpec) bool {
+	pe.mu.RLock()
+	reg := pe.registry
+	pe.mu.RUnlock()
+
 	if pe.globalPolicy != nil {
-		if matchDenySpec(name, pe.globalPolicy.Deny) {
+		if matchDenySpec(reg, name, pe.globalPolicy.Deny) {
 			return true
 		}
 	}
 	if agentPolicy != nil {
-		if matchDenySpec(name, agentPolicy.Deny) {
+		if matchDenySpec(reg, name, agentPolicy.Deny) {
 			return true
 		}
 	}
@@ -379,22 +452,12 @@ func (pe *PolicyEngine) IsDenied(name string, agentPolicy *config.ToolPolicySpec
 }
 
 // matchDenySpec returns true if name matches any entry in the deny spec (with group expansion).
-func matchDenySpec(name string, spec []string) bool {
-	toolGroupsMu.RLock()
-	defer toolGroupsMu.RUnlock()
-
-	for _, s := range spec {
-		if after, ok := strings.CutPrefix(s, "group:"); ok {
-			if members, ok := toolGroups[after]; ok {
-				if slices.Contains(members, name) {
-					return true
-				}
-			}
-		} else if s == name {
-			return true
-		}
+func matchDenySpec(reg *Registry, name string, spec []string) bool {
+	if reg == nil {
+		// No groups to expand — plain match only
+		return slices.Contains(spec, name)
 	}
-	return false
+	return reg.MatchDenySpec(name, spec)
 }
 
 // StripToolPrefix removes a prefix pattern from a tool name returned by the LLM.
@@ -441,4 +504,17 @@ func copySlice(s []string) []string {
 	c := make([]string, len(s))
 	copy(c, s)
 	return c
+}
+
+// filterByCapability removes tools whose metadata matches any denied capability.
+func filterByCapability(names []string, denyCaps []ToolCapability, reg *Registry) []string {
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		meta := reg.GetMetadata(name)
+		denied := slices.ContainsFunc(denyCaps, meta.HasCapability)
+		if !denied {
+			out = append(out, name)
+		}
+	}
+	return out
 }

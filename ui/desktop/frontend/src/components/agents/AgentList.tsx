@@ -11,7 +11,7 @@ import type { AgentData, AgentInput } from '../../types/agent'
 
 export function AgentList() {
   const { t } = useTranslation(['agents', 'common'])
-  const { agents, loading, atLimit, createAgent, updateAgent, deleteAgent, resummonAgent, fetchAgents } = useAgentCrud()
+  const { agents, loading, atLimit, createAgent, updateAgent, deleteAgent, resummonAgent, cancelSummonAgent, fetchAgents } = useAgentCrud()
   const setStoreAgents = useAgentStore((s) => s.setAgents)
 
   const [formOpen, setFormOpen] = useState(false)
@@ -115,6 +115,7 @@ export function AgentList() {
       {/* Fullscreen detail panel */}
       {detailAgent && (
         <AgentDetailPanel
+          key={detailAgent.id}
           agent={detailAgent}
           onSave={handleSave}
           onResummon={async (id) => { await resummonAgent(id); setSummoningAgent({ id, name: detailAgent.display_name || detailAgent.agent_key }) }}
@@ -139,6 +140,7 @@ export function AgentList() {
           agentId={summoningAgent.id}
           agentName={summoningAgent.name}
           onContinue={handleSummoningComplete}
+          onCancel={cancelSummonAgent}
         />
       )}
     </>

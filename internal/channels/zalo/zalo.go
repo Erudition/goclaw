@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
@@ -25,25 +24,29 @@ import (
 )
 
 const (
-	apiBase            = "https://bot-api.zaloplatforms.com"
-	defaultPollTimeout = 30
-	maxTextLength      = 2000
-	defaultMediaMaxMB  = 5
-	pollErrorBackoff   = 5 * time.Second
-	pairingDebounce    = 60 * time.Second
+	defaultPollTimeout  = 30
+	maxTextLength       = 2000
+	defaultMediaMaxMB   = 5
+	pollErrorBackoff    = 5 * time.Second
+	pairingDebounce     = 60 * time.Second
+	pollTimeoutHeadroom = 7 * time.Second
 )
+
+// apiBase is the Zalo Bot API root. Declared as a variable so tests can
+// override it with an httptest.NewServer URL.
+var apiBase = "https://bot-api.zaloplatforms.com"
 
 // Channel connects to the Zalo OA Bot API.
 type Channel struct {
 	*channels.BaseChannel
-	token           string
-	dmPolicy        string
-	mediaMaxMB      int
-	blockReply      *bool
-	pairingService  store.PairingStore
-	pairingDebounce sync.Map // senderID → time.Time
-	stopCh          chan struct{}
-	client          *http.Client
+	token      string
+	dmPolicy   string
+	mediaMaxMB int
+	blockReply *bool
+	stopCh     chan struct{}
+	client     *http.Client
+	pollClient *http.Client
+	// pairingService, pairingDebounce are inherited from channels.BaseChannel.
 }
 
 // New creates a new Zalo channel.
@@ -65,16 +68,18 @@ func New(cfg config.ZaloConfig, msgBus *bus.MessageBus, pairingSvc store.Pairing
 		mediaMax = defaultMediaMaxMB
 	}
 
-	return &Channel{
-		BaseChannel:    base,
-		token:          cfg.Token,
-		dmPolicy:       dmPolicy,
-		mediaMaxMB:     mediaMax,
-		blockReply:     cfg.BlockReply,
-		pairingService: pairingSvc,
-		stopCh:         make(chan struct{}),
-		client:         &http.Client{Timeout: 60 * time.Second},
-	}, nil
+	ch := &Channel{
+		BaseChannel: base,
+		token:       cfg.Token,
+		dmPolicy:    dmPolicy,
+		mediaMaxMB:  mediaMax,
+		blockReply:  cfg.BlockReply,
+		stopCh:      make(chan struct{}),
+		client:      &http.Client{Timeout: 60 * time.Second},
+		pollClient:  &http.Client{Timeout: 0},
+	}
+	ch.SetPairingService(pairingSvc)
+	return ch, nil
 }
 
 // BlockReplyEnabled returns the per-channel block_reply override (nil = inherit gateway default).
@@ -283,59 +288,30 @@ func (c *Channel) handleImageMessage(msg *zaloMessage) {
 // --- DM Policy ---
 
 func (c *Channel) checkDMPolicy(ctx context.Context, senderID, chatID string) bool {
-	switch c.dmPolicy {
-	case "disabled":
-		slog.Debug("zalo message rejected: DMs disabled", "sender_id", senderID)
-		return false
-
-	case "open":
+	result := c.CheckDMPolicy(ctx, senderID, c.dmPolicy)
+	switch result {
+	case channels.PolicyAllow:
 		return true
-
-	case "allowlist":
-		if !c.IsAllowed(senderID) {
-			slog.Debug("zalo message rejected by allowlist", "sender_id", senderID)
-			return false
-		}
-		return true
-
-	default: // "pairing"
-		// Check if already paired or in allowlist
-		paired := false
-		if c.pairingService != nil {
-			p, err := c.pairingService.IsPaired(ctx, senderID, c.Name())
-			if err != nil {
-				slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
-					"sender_id", senderID, "channel", c.Name(), "error", err)
-				paired = true
-			} else {
-				paired = p
-			}
-		}
-		inAllowList := c.HasAllowList() && c.IsAllowed(senderID)
-
-		if paired || inAllowList {
-			return true
-		}
-
-		// Send pairing reply (debounced)
+	case channels.PolicyNeedsPairing:
 		c.sendPairingReply(ctx, senderID, chatID)
+		return false
+	default:
+		slog.Debug("zalo message rejected by policy", "sender_id", senderID, "policy", c.dmPolicy)
 		return false
 	}
 }
 
 func (c *Channel) sendPairingReply(ctx context.Context, senderID, chatID string) {
-	if c.pairingService == nil {
+	ps := c.PairingService()
+	if ps == nil {
 		return
 	}
 
-	// Debounce
-	if lastSent, ok := c.pairingDebounce.Load(senderID); ok {
-		if time.Since(lastSent.(time.Time)) < pairingDebounce {
-			return
-		}
+	if !c.CanSendPairingNotif(senderID, pairingDebounce) {
+		return
 	}
 
-	code, err := c.pairingService.RequestPairing(ctx, senderID, c.Name(), chatID, "default", nil)
+	code, err := ps.RequestPairing(ctx, senderID, c.Name(), chatID, "default", nil)
 	if err != nil {
 		slog.Debug("zalo pairing request failed", "sender_id", senderID, "error", err)
 		return
@@ -349,7 +325,7 @@ func (c *Channel) sendPairingReply(ctx context.Context, senderID, chatID string)
 	if err := c.sendMessage(chatID, replyText); err != nil {
 		slog.Warn("failed to send zalo pairing reply", "error", err)
 	} else {
-		c.pairingDebounce.Store(senderID, time.Now())
+		c.MarkPairingNotifSent(senderID)
 		slog.Info("zalo pairing reply sent", "sender_id", senderID, "code", code)
 	}
 }
@@ -406,20 +382,7 @@ func (c *Channel) downloadMedia(url string) (string, error) {
 // --- Chunked text sending ---
 
 func (c *Channel) sendChunkedText(chatID, text string) error {
-	for len(text) > 0 {
-		chunk := text
-		if len(chunk) > maxTextLength {
-			// Try to break at newline
-			cutAt := maxTextLength
-			if idx := strings.LastIndex(text[:maxTextLength], "\n"); idx > maxTextLength/2 {
-				cutAt = idx + 1
-			}
-			chunk = text[:cutAt]
-			text = text[cutAt:]
-		} else {
-			text = ""
-		}
-
+	for _, chunk := range channels.ChunkMarkdown(text, maxTextLength) {
 		if err := c.sendMessage(chatID, chunk); err != nil {
 			return err
 		}
@@ -438,7 +401,7 @@ type zaloAPIResponse struct {
 
 type zaloBotInfo struct {
 	ID   string `json:"id"`
-	Name string `json:"name"`
+	Name string `json:"display_name"`
 }
 
 type zaloMessage struct {
@@ -454,12 +417,12 @@ type zaloMessage struct {
 
 type zaloFrom struct {
 	ID       string `json:"id"`
-	Username string `json:"username"`
+	Username string `json:"display_name"`
 }
 
 type zaloChat struct {
 	ID   string `json:"id"`
-	Type string `json:"type"`
+	Type string `json:"chat_type"`
 }
 
 type zaloUpdate struct {
@@ -468,6 +431,10 @@ type zaloUpdate struct {
 }
 
 func (c *Channel) callAPI(method string, body any) (json.RawMessage, error) {
+	return c.callAPIWith(context.Background(), c.client, method, body)
+}
+
+func (c *Channel) callAPIWith(ctx context.Context, client *http.Client, method string, body any) (json.RawMessage, error) {
 	url := fmt.Sprintf("%s/bot%s/%s", apiBase, c.token, method)
 
 	var reqBody io.Reader
@@ -479,7 +446,7 @@ func (c *Channel) callAPI(method string, body any) (json.RawMessage, error) {
 		reqBody = bytes.NewReader(data)
 	}
 
-	req, err := http.NewRequest("POST", url, reqBody)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -487,7 +454,7 @@ func (c *Channel) callAPI(method string, body any) (json.RawMessage, error) {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := c.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("api call %s: %w", method, err)
 	}
@@ -528,16 +495,22 @@ func (c *Channel) getUpdates(timeout int) ([]zaloUpdate, error) {
 		"timeout": timeout,
 	}
 
-	result, err := c.callAPI("getUpdates", params)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second+pollTimeoutHeadroom)
+	defer cancel()
+
+	result, err := c.callAPIWith(ctx, c.pollClient, "getUpdates", params)
 	if err != nil {
 		return nil, err
 	}
 
-	var updates []zaloUpdate
-	if err := json.Unmarshal(result, &updates); err != nil {
+	var update zaloUpdate
+	if err := json.Unmarshal(result, &update); err != nil {
 		return nil, fmt.Errorf("unmarshal updates: %w", err)
 	}
-	return updates, nil
+	if update.EventName == "" {
+		return nil, nil
+	}
+	return []zaloUpdate{update}, nil
 }
 
 func (c *Channel) sendMessage(chatID, text string) error {

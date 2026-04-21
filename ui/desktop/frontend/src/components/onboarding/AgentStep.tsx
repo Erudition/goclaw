@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { getApiClient } from '../../lib/api'
+import { agentService } from '../../services/agent-service'
 
 import { SummoningModal } from './SummoningModal'
 import type { ProviderData } from '../../types/provider'
@@ -82,10 +83,6 @@ export function AgentStep({ provider, model, onBack, onComplete }: AgentStepProp
     setLoading(true)
     setError('')
     try {
-      const otherConfig: Record<string, unknown> = {}
-      if (description.trim()) otherConfig.description = description.trim()
-      if (selectedEmoji) otherConfig.emoji = selectedEmoji
-
       const result = await getApiClient().post<{ id: string }>('/v1/agents', {
         agent_key: agentKey,
         display_name: displayName.trim() || undefined,
@@ -93,7 +90,9 @@ export function AgentStep({ provider, model, onBack, onComplete }: AgentStepProp
         model: model || '',
         agent_type: 'predefined',
         is_default: true,
-        other_config: Object.keys(otherConfig).length > 0 ? otherConfig : undefined,
+        // Promoted fields at top level — agent_description triggers summoning on backend
+        agent_description: description.trim() || null,
+        emoji: selectedEmoji || null,
       })
       setCreatedAgent({ id: result.id, name: displayName.trim() || agentKey })
     } catch (err) {
@@ -111,6 +110,7 @@ export function AgentStep({ provider, model, onBack, onComplete }: AgentStepProp
         agentId={createdAgent.id}
         agentName={createdAgent.name}
         onContinue={onComplete}
+        onCancel={(id) => agentService.cancelSummon(id)}
       />
     )
   }

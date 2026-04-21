@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, lazy, Suspense } from "react";
 import { DetailPageSkeleton } from "@/components/shared/loading-skeleton";
 import { ConfirmDeleteDialog } from "@/components/shared/confirm-delete-dialog";
 import { useTranslation } from "react-i18next";
@@ -7,8 +7,11 @@ import { BoardHeader } from "./board/board-header";
 import { BoardContainer } from "./board/board-container";
 import { TeamInfoDialog } from "./board/team-info-dialog";
 import { TeamMembersDialog } from "./board/team-members-dialog";
-import { TeamWorkspaceDialog } from "./board/team-workspace-dialog";
 import type { TeamData, TeamMemberData, TeamAccessSettings, ScopeEntry } from "@/types/team";
+
+const TeamWorkspaceDialog = lazy(() =>
+  import("./board/team-workspace-dialog").then((m) => ({ default: m.TeamWorkspaceDialog }))
+);
 
 interface TeamDetailPageProps {
   teamId: string;
@@ -19,7 +22,7 @@ export function TeamDetailPage({ teamId, onBack }: TeamDetailPageProps) {
   const { t } = useTranslation("teams");
   const {
     getTeam, getTeamTasks, getTeamScopes, addMember, removeMember, deleteTeam,
-    getTaskDetail, getTaskLight, deleteTask, deleteTasksBulk, addTaskComment,
+    getTaskDetail, getTaskLight, deleteTask, deleteTasksBulk, addTaskComment, updateTeam,
   } = useTeams();
 
   // Wrap addTaskComment to match (teamId, taskId, content) signature expected by UI components.
@@ -79,6 +82,16 @@ export function TeamDetailPage({ teamId, onBack }: TeamDetailPageProps) {
     await reload();
   }, [teamId, removeMember, reload]);
 
+  const handleRenameTeam = useCallback(async (newName: string) => {
+    await updateTeam(teamId, { name: newName });
+    await reload();
+  }, [teamId, updateTeam, reload]);
+
+  const handleUpdateDescription = useCallback(async (newDesc: string) => {
+    await updateTeam(teamId, { description: newDesc });
+    await reload();
+  }, [teamId, updateTeam, reload]);
+
   if (loading || !team) {
     return <DetailPageSkeleton tabs={3} />;
   }
@@ -95,6 +108,7 @@ export function TeamDetailPage({ teamId, onBack }: TeamDetailPageProps) {
         onDelete={() => setDeleteOpen(true)}
         onSettings={() => setInfoOpen(true)}
         onMembers={() => setMembersOpen(true)}
+        onRenameTeam={handleRenameTeam}
       />
 
       <BoardContainer
@@ -119,6 +133,7 @@ export function TeamDetailPage({ teamId, onBack }: TeamDetailPageProps) {
         teamId={teamId}
         members={members}
         onSaved={reload}
+        onUpdateDescription={handleUpdateDescription}
       />
 
       {/* Members dialog */}
@@ -131,12 +146,14 @@ export function TeamDetailPage({ teamId, onBack }: TeamDetailPageProps) {
       />
 
       {/* Workspace dialog */}
-      <TeamWorkspaceDialog
-        open={workspaceOpen}
-        onOpenChange={setWorkspaceOpen}
-        teamId={teamId}
-        scopes={scopes}
-      />
+      <Suspense fallback={null}>
+        <TeamWorkspaceDialog
+          open={workspaceOpen}
+          onOpenChange={setWorkspaceOpen}
+          teamId={teamId}
+          scopes={scopes}
+        />
+      </Suspense>
 
       {/* Delete confirmation */}
       <ConfirmDeleteDialog

@@ -9,7 +9,7 @@
     "system": "系统"
   },
   "nav": {
-    "agentTeams": "Agent Team",
+    "agentTeams": "Agent Link & Team",
     "agents": "Agent",
     "approvals": "审批",
     "importExport": "Import & Export",
@@ -19,6 +19,7 @@
     "chat": "对话",
     "config": "配置",
     "cron": "定时任务",
+    "hooks": "Hooks",
     "customTools": "自定义工具",
     "logs": "日志",
     "mcpServers": "MCP 服务器",
@@ -40,6 +41,7 @@
     "apiKeys": "API Keys",
     "apiDocs": "API 文档",
     "packages": "软件包",
-    "tenants": "租户"
+    "tenants": "租户",
+    "backupRestore": "备份与恢复"
   }
 }

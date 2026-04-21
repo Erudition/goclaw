@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -31,30 +33,31 @@ func DefaultDenyPatterns() []*regexp.Regexp {
 
 // ExecTool executes shell commands, optionally inside a sandbox container.
 type ExecTool struct {
-	workspace       string
+	workspace        string
 	timeout          time.Duration
-	pathDenyPatterns []*regexp.Regexp     // always-on path-based denials (DenyPaths)
-	denyExemptions   []string             // substrings that exempt a command from deny
+	pathDenyPatterns []*regexp.Regexp // always-on path-based denials (DenyPaths)
+	pathDenyRoots    []string         // raw deny roots for nested workspace exemptions
+	denyExemptions   []string         // substrings that exempt a command from deny
 	restrict         bool
 	sandboxMgr       sandbox.Manager      // nil = no sandbox, execute on host
 	approvalMgr      *ExecApprovalManager // nil = no approval needed
 	agentID          string               // for approval request context
-	secureCLIStore   store.SecureCLIStore  // nil = no credentialed exec
+	secureCLIStore   store.SecureCLIStore // nil = no credentialed exec
 }
 
 // NewExecTool creates an exec tool that runs commands directly on the host.
 func NewExecTool(workspace string, restrict bool) *ExecTool {
 	return &ExecTool{
 		workspace: workspace,
-		timeout:    60 * time.Second,
-		restrict:   restrict,
+		timeout:   60 * time.Second,
+		restrict:  restrict,
 	}
 }
 
 // NewSandboxedExecTool creates an exec tool that routes commands through a sandbox container.
 func NewSandboxedExecTool(workspace string, restrict bool, mgr sandbox.Manager) *ExecTool {
 	return &ExecTool{
-		workspace: workspace,
+		workspace:  workspace,
 		timeout:    300 * time.Second, // sandbox allows longer timeout
 		restrict:   restrict,
 		sandboxMgr: mgr,
@@ -70,6 +73,7 @@ func (t *ExecTool) DenyPaths(paths ...string) {
 	for _, p := range paths {
 		escaped := regexp.QuoteMeta(p)
 		t.pathDenyPatterns = append(t.pathDenyPatterns, regexp.MustCompile(escaped))
+		t.pathDenyRoots = append(t.pathDenyRoots, p)
 	}
 }
 
@@ -105,6 +109,13 @@ func (t *ExecTool) SetApprovalManager(mgr *ExecApprovalManager, agentID string) 
 // SetSecureCLIStore sets the credential store for credentialed exec.
 func (t *ExecTool) SetSecureCLIStore(s store.SecureCLIStore) {
 	t.secureCLIStore = s
+}
+
+// HasSecureCLIStore reports whether a credential store is wired.
+// Intended for wiring-check tests that verify subagent ExecTools also enforce
+// the secure-CLI gate (Red Team F3).
+func (t *ExecTool) HasSecureCLIStore() bool {
+	return t.secureCLIStore != nil
 }
 
 func (t *ExecTool) Name() string        { return "exec" }
@@ -155,29 +166,48 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 	allPatterns := make([]*regexp.Regexp, 0, len(groupPatterns)+len(t.pathDenyPatterns))
 	allPatterns = append(allPatterns, groupPatterns...)
 	allPatterns = append(allPatterns, t.pathDenyPatterns...)
+	exemptions := append([]string{}, t.denyExemptions...)
+	exemptions = append(exemptions, t.dynamicPathExemptions(ctx)...)
 
 	// Sandbox routing (sandboxKey from ctx — thread-safe)
 	sandboxKey := ToolSandboxKeyFromCtx(ctx)
 
 	// Check for dangerous commands (applies to both host and sandbox).
+	wordFields := parseExecCommandWords(normalizedCommand)
+	pathBaseDir := ToolWorkspaceFromCtx(ctx)
+	if pathBaseDir == "" {
+		pathBaseDir = t.workspace
+	}
 	for _, pattern := range allPatterns {
 		if pattern.MatchString(normalizedCommand) {
-			// Check if any exemption applies (e.g. skills-store within .goclaw).
-			// Uses argument-level prefix matching to prevent bypass via comments
-			// (e.g. "echo pwned # .goclaw/skills-store/") while still allowing
-			// commands like "cat .goclaw/skills-store/tool.py".
+			// Check if exemption applies. Only exempt if EVERY field that
+			// individually matches the deny pattern is covered by an exemption.
+			// This prevents pipe/comment bypass: "cat /app/data/skills-store/x | cat /app/data/secret"
+			// — the second field matches deny but has no exemption → denied.
+			// Strips surrounding quotes (LLMs often quote paths) and rejects
+			// path traversal ("..") to prevent exemption escape.
 			exempt := false
 			trimmed := strings.TrimSpace(normalizedCommand)
-			for _, ex := range t.denyExemptions {
-				for _, field := range strings.Fields(trimmed) {
-					if strings.HasPrefix(field, ex) {
-						exempt = true
-						break
-					}
+			fields := wordFields
+			if len(fields) == 0 {
+				fields = strings.Fields(trimmed)
+			}
+			matchingFields := 0
+			exemptFields := 0
+			for _, field := range fields {
+				clean := strings.TrimSpace(field)
+				if !pattern.MatchString(clean) {
+					continue // field doesn't trigger this deny pattern
 				}
-				if exempt {
-					break
+				matchingFields++
+				if matchesAnyPathExemption(clean, exemptions, pathBaseDir) {
+					exemptFields++
 				}
+			}
+
+			// Exempt only if at least one field matched AND all matched fields are exempt.
+			if matchingFields > 0 && exemptFields == matchingFields {
+				exempt = true
 			}
 
 			// Sandbox network relaxation: allow DNS tools if networking is enabled in sandbox.
@@ -232,7 +262,47 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 				cwd = wd
 			}
 		}
-		return t.executeCredentialed(ctx, cred, binary, cmdArgs, cwd, sandboxKey)
+		sandboxKey := ToolSandboxKeyFromCtx(ctx)
+		return t.executeCredentialed(ctx, cred, binary, cmdArgs, cwd, sandboxKey, command)
+	}
+
+	// Secure CLI gate: registered-but-not-granted binaries MUST NOT fall through
+	// to host exec with parent env. Works on the already-normalized command
+	// (Red Team F6) and unwraps shell wrappers up to depth 3 (Red Team F1).
+	// Fails CLOSED on DB error (Red Team F7).
+	if t.secureCLIStore != nil {
+		candidates, tooDeep := collectGateCandidates(normalizedCommand)
+		if tooDeep {
+			slog.Warn("security.credentialed_binary_wrapper_too_deep",
+				"command", truncateCmd(normalizedCommand, 80),
+				"agent_id", store.AgentIDFromContext(ctx))
+			return ErrorResult("Command nesting too deep (>3 shell wrappers). This looks adversarial; if legitimate, flatten the command.")
+		}
+		for _, c := range candidates {
+			if c.binary == "" {
+				continue
+			}
+			gctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			registered, rerr := t.secureCLIStore.IsRegisteredBinary(gctx, c.binary)
+			cancel()
+			if rerr != nil {
+				slog.Warn("security.credentialed_binary_gate_error",
+					"binary", c.binary, "error", rerr,
+					"agent_id", store.AgentIDFromContext(ctx))
+				return ErrorResult("Secure CLI gate temporarily unavailable. Retry in a moment.")
+			}
+			if registered {
+				slog.Warn("security.credentialed_binary_denied",
+					"binary", c.binary,
+					"wrapper", c.wrapper,
+					"agent_id", store.AgentIDFromContext(ctx),
+					"tenant_id", store.TenantIDFromContext(ctx),
+					"command_prefix", truncateCmd(normalizedCommand, 80))
+				return ErrorResult(fmt.Sprintf(
+					"Binary %q requires a secure CLI grant. Ask admin to grant access to this agent.",
+					c.binary))
+			}
+		}
 	}
 
 	// Exec approval check (matching TS exec-approval.ts pipeline)
@@ -297,12 +367,37 @@ func matchesAny(command string, patterns []*regexp.Regexp) bool {
 }
 
 // executeOnHost runs a command directly on the host (original behavior).
+// ctx cancellation (e.g. agent abort) triggers SIGTERM → 3s grace → SIGKILL on the
+// entire process group so forked children are also cleaned up (no orphans).
 func (t *ExecTool) executeOnHost(ctx context.Context, command, cwd string) *Result {
 	ctx, cancel := context.WithTimeout(ctx, t.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	// Use plain exec.Command (not CommandContext) so we control the kill sequence.
+	// CommandContext would SIGKILL only the direct child, leaving forked grandchildren alive.
+	// Route through the platform shell: cmd.exe on Windows, sh on POSIX.
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd", "/C", command)
+	} else {
+		cmd = exec.Command("sh", "-c", command)
+	}
 	cmd.Dir = cwd
+
+	// Scrub credential env vars so fall-through exec cannot exfiltrate
+	// host secrets (Red Team F4). Uses static deny list + dynamic keys
+	// discovered from any registered secure-cli binary for this tenant.
+	var dynKeys []string
+	if t.secureCLIStore != nil {
+		dynKeys = t.credentialEnvKeys(ctx)
+	} else {
+		dynKeys = staticCredentialEnvKeys
+	}
+	cmd.Env = scrubCredentialEnv(os.Environ(), dynKeys)
+
+	// Place the child in its own process group so killProcessGroup(-pgid, sig)
+	// reaches the shell and all of its forked children.
+	setProcessGroup(cmd)
 
 	// Limit output to 1MB to prevent OOM from runaway commands.
 	stdout := &limitedBuffer{max: 1 << 20}
@@ -310,8 +405,38 @@ func (t *ExecTool) executeOnHost(ctx context.Context, command, cwd string) *Resu
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return ErrorResult(fmt.Sprintf("failed to start command: %v", err))
+	}
 
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	select {
+	case err := <-done:
+		// Normal completion (success or non-zero exit).
+		return buildHostResult(err, stdout, stderr, ctx, t.timeout)
+
+	case <-ctx.Done():
+		// Context cancelled or timed out — kill the process group gracefully then forcefully.
+		_ = killProcessGroup(cmd, syscallSIGTERM)
+		select {
+		case <-done:
+			// Exited cleanly after SIGTERM.
+		case <-time.After(3 * time.Second):
+			// Still alive after grace period — force kill.
+			_ = killProcessGroup(cmd, syscallSIGKILL)
+			<-done
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return ErrorResult(fmt.Sprintf("command timed out after %s", t.timeout))
+		}
+		return ErrorResult("command aborted")
+	}
+}
+
+// buildHostResult formats the result of a completed host command execution.
+func buildHostResult(err error, stdout, stderr *limitedBuffer, ctx context.Context, timeout time.Duration) *Result {
 	var result string
 	if stdout.Len() > 0 {
 		result = stdout.String()
@@ -324,8 +449,8 @@ func (t *ExecTool) executeOnHost(ctx context.Context, command, cwd string) *Resu
 	}
 
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return ErrorResult(fmt.Sprintf("command timed out after %s", t.timeout))
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return ErrorResult(fmt.Sprintf("command timed out after %s", timeout))
 		}
 		if result == "" {
 			result = err.Error()
@@ -336,7 +461,6 @@ func (t *ExecTool) executeOnHost(ctx context.Context, command, cwd string) *Resu
 	if result == "" {
 		result = "(command completed with no output)"
 	}
-
 	return SilentResult(capExecOutput(result, execMaxOutputChars))
 }
 

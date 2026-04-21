@@ -11,8 +11,9 @@ import { useConfigPermissions, type ConfigPermission } from "../hooks/use-config
 import { UserPickerCombobox } from "@/components/shared/user-picker-combobox";
 import { useContactResolver } from "@/hooks/use-contact-resolver";
 import { formatUserLabel } from "@/lib/format-user-label";
-import { useWs } from "@/hooks/use-ws";
+import { useWs, useHttp } from "@/hooks/use-ws";
 import { Methods } from "@/api/protocol";
+import type { ChannelContact } from "@/types/contact";
 import type { DeliveryTarget } from "../hooks/use-agent-heartbeat";
 
 const CONFIG_TYPES = [
@@ -54,6 +55,7 @@ interface AgentPermissionsTabProps {
 export function AgentPermissionsTab({ agentId }: AgentPermissionsTabProps) {
   const { t } = useTranslation("agents");
   const ws = useWs();
+  const http = useHttp();
   const { permissions, loading, load, grant, revoke } = useConfigPermissions(agentId);
 
   const [userId, setUserId] = useState("");
@@ -106,9 +108,27 @@ export function AgentPermissionsTab({ agentId }: AgentPermissionsTabProps) {
   useEffect(() => { load(); }, [load]);
 
   const handleAdd = async () => {
-    if (!userId.trim()) return;
+    const trimmed = userId.trim();
+    if (!trimmed) return;
     setAdding(true);
-    await grant(scope, configType, userId.trim(), permission);
+    // Look up contact info so the grant carries displayName/username metadata
+    // upfront — avoids the round-trip to Telegram's getChatMember on the
+    // backend and works even if the bot isn't in the group yet.
+    let metadata: Record<string, string> | undefined;
+    try {
+      const res = await http.get<{ contacts: Record<string, ChannelContact> }>(
+        "/v1/contacts/resolve",
+        { ids: trimmed },
+      );
+      const c = res.contacts?.[trimmed];
+      if (c?.display_name || c?.username) {
+        metadata = {
+          displayName: c.display_name ?? "",
+          username: c.username ?? "",
+        };
+      }
+    } catch { /* best-effort — backend still auto-enriches via getChatMember */ }
+    await grant(scope, configType, trimmed, permission, metadata);
     setUserId("");
     setAdding(false);
   };
@@ -144,7 +164,7 @@ export function AgentPermissionsTab({ agentId }: AgentPermissionsTabProps) {
   const currentDescKey = CONFIG_TYPES.find((c) => c.value === configType)?.descKey ?? "";
 
   return (
-    <div className="space-y-4">
+    <section className="space-y-4 rounded-lg border p-3 sm:p-4">
       {/* Header */}
       <div className="flex items-start justify-between gap-2">
         <div>
@@ -237,20 +257,25 @@ export function AgentPermissionsTab({ agentId }: AgentPermissionsTabProps) {
                       <span className="text-xs font-medium text-muted-foreground">{scopeLabels.get(scopeKey) ?? scopeKey}</span>
                     </div>
                     {writers.map((p) => {
-                      const label = p.metadata?.displayName || formatUserLabel(p.userId, resolve);
+                      // Label preference: displayName → contact resolver → "User <id>" fallback.
+                      // Username is rendered separately next to the label when present.
+                      const resolved = formatUserLabel(p.userId, resolve);
+                      const isNumericFallback = /^#?-?\d+$/.test(resolved);
+                      const label = p.metadata?.displayName
+                        || (isNumericFallback ? t("permissions.unknownWriterLabel", { id: p.userId }) : resolved);
                       const username = p.metadata?.username ? ` @${p.metadata.username}` : "";
                       return (
                         <div key={p.id} className="flex items-center justify-between gap-2 px-3 py-2 pl-7">
                           <div className="flex items-center gap-2 min-w-0 text-sm">
                             <Badge
                               variant={p.permission === "allow" ? "success" : "destructive"}
-                              className="text-[10px] shrink-0"
+                              className="text-2xs shrink-0"
                             >
                               {p.permission}
                             </Badge>
                             <span className="font-medium truncate">{label}</span>
                             {username && (
-                              <span className="text-[11px] text-muted-foreground shrink-0">{username}</span>
+                              <span className="text-xs-plus text-muted-foreground shrink-0">{username}</span>
                             )}
                           </div>
                           <Button
@@ -282,13 +307,13 @@ export function AgentPermissionsTab({ agentId }: AgentPermissionsTabProps) {
                     <div className="flex items-center gap-2 min-w-0 text-sm">
                       <Badge
                         variant={p.permission === "allow" ? "success" : "destructive"}
-                        className="text-[10px] shrink-0"
+                        className="text-2xs shrink-0"
                       >
                         {p.permission}
                       </Badge>
                       <span className="font-medium truncate">{formatUserLabel(p.userId, resolve)}</span>
-                      <span className="text-[11px] text-muted-foreground shrink-0">{p.configType}</span>
-                      <span className="text-[11px] text-muted-foreground shrink-0">@ {scopeLabels.get(p.scope) ?? p.scope}</span>
+                      <span className="text-xs-plus text-muted-foreground shrink-0">{p.configType}</span>
+                      <span className="text-xs-plus text-muted-foreground shrink-0">@ {scopeLabels.get(p.scope) ?? p.scope}</span>
                     </div>
                     <Button
                       variant="ghost"
@@ -305,6 +330,6 @@ export function AgentPermissionsTab({ agentId }: AgentPermissionsTabProps) {
           )}
         </div>
       )}
-    </div>
+    </section>
   );
 }

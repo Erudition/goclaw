@@ -29,6 +29,13 @@ export class HttpClient {
     });
   }
 
+  async patch<T>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>(this.buildUrl(path), {
+      method: "PATCH",
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  }
+
   async delete<T>(path: string): Promise<T> {
     return this.request<T>(this.buildUrl(path), { method: "DELETE" });
   }
@@ -77,13 +84,13 @@ export class HttpClient {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
-      throw new ApiError(
-        err.code ?? "HTTP_ERROR",
-        err.error ?? err.message ?? res.statusText,
-      );
+      const nested = typeof err.error === "object" && err.error !== null ? err.error : null;
+      const code = nested?.code ?? err.code ?? "HTTP_ERROR";
+      const message = nested?.message ?? (typeof err.error === "string" ? err.error : null) ?? err.message ?? res.statusText;
+      throw new ApiError(code, message);
     }
 
-    return res.json() as Promise<T>;
+    return this.readJson<T>(res);
   }
 
   private buildUrl(path: string, params?: Record<string, string>): string {
@@ -133,15 +140,29 @@ export class HttpClient {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
-      if (res.status === 401 || err.code === "TENANT_ACCESS_REVOKED") {
+      // Backend wraps errors as { "error": { "code": "...", "message": "..." } }
+      const nested = typeof err.error === "object" && err.error !== null ? err.error : null;
+      const code = nested?.code ?? err.code ?? "HTTP_ERROR";
+      const message = nested?.message ?? (typeof err.error === "string" ? err.error : null) ?? err.message ?? res.statusText;
+      if (res.status === 401 || code === "TENANT_ACCESS_REVOKED") {
         this.onAuthFailure?.();
       }
-      throw new ApiError(
-        err.code ?? "HTTP_ERROR",
-        err.error ?? err.message ?? res.statusText,
-      );
+      throw new ApiError(code, message);
     }
 
-    return res.json() as Promise<T>;
+    return this.readJson<T>(res);
+  }
+
+  private async readJson<T>(res: Response): Promise<T> {
+    if (res.status === 204 || res.headers.get("content-length") === "0") {
+      return undefined as T;
+    }
+
+    const text = await res.text();
+    if (text.trim().length === 0) {
+      return undefined as T;
+    }
+
+    return JSON.parse(text) as T;
   }
 }

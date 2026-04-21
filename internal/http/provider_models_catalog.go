@@ -5,6 +5,7 @@ package http
 // The platform does not expose a /v1/models endpoint.
 func bailianModels() []ModelInfo {
 	return []ModelInfo{
+		{ID: "qwen3.6-plus", Name: "Qwen 3.6 Plus"},
 		{ID: "qwen3.5-plus", Name: "Qwen 3.5 Plus"},
 		{ID: "kimi-k2.5", Name: "Kimi K2.5"},
 		{ID: "GLM-5", Name: "GLM-5"},
@@ -44,8 +45,11 @@ func minimaxModels() []ModelInfo {
 // DashScope does not expose a standard /v1/models endpoint.
 func dashScopeModels() []ModelInfo {
 	return []ModelInfo{
+		// Qwen3.6 series — Agentic Coding + 1M context
+		{ID: "qwen3.6-plus", Name: "Qwen 3.6 Plus"},
 		// Qwen3.5 series — Text Generation + Deep Thinking + Visual Understanding
 		{ID: "qwen3.5-plus", Name: "Qwen 3.5 Plus"},
+		{ID: "qwen3.5-flash", Name: "Qwen 3.5 Flash"},
 		{ID: "qwen3.5-turbo", Name: "Qwen 3.5 Turbo"},
 		// Qwen3 hosted series — Text + Thinking
 		{ID: "qwen3-max", Name: "Qwen 3 Max"},
@@ -56,15 +60,6 @@ func dashScopeModels() []ModelInfo {
 		{ID: "wan2.1-image", Name: "Wan 2.1 Image"},
 		// Video generation
 		{ID: "wan2.6-video", Name: "Wan 2.6 Video"},
-	}
-}
-
-// sunoModels returns a hardcoded list of Suno music generation models.
-func sunoModels() []ModelInfo {
-	return []ModelInfo{
-		{ID: "v4.5", Name: "Suno V4.5"},
-		{ID: "v4", Name: "Suno V4"},
-		{ID: "v3.5", Name: "Suno V3.5"},
 	}
 }
 

@@ -1,9 +1,10 @@
-import { useMemo, useState, useRef, useEffect, useLayoutEffect } from "react";
+import { useMemo, useState, useRef, useLayoutEffect } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { X, ChevronDownIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useBuiltinTools } from "@/pages/builtin-tools/hooks/use-builtin-tools";
+import { usePortalDropdownClose } from "@/hooks/use-portal-dropdown-close";
 
 interface ToolNameSelectProps {
   value: string[];
@@ -65,21 +66,11 @@ export function ToolNameSelect({
     });
   }, [open, search]);
 
-  // Close on outside click
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (
-        containerRef.current && !containerRef.current.contains(target) &&
-        (!dropdownRef.current || !dropdownRef.current.contains(target))
-      ) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
+  usePortalDropdownClose({
+    open,
+    onClose: () => setOpen(false),
+    ignore: [containerRef, dropdownRef],
+  });
 
   const addTool = (name: string) => {
     if (!value.includes(name)) {
@@ -155,7 +146,7 @@ export function ToolNameSelect({
         >
           {grouped.builtin.length > 0 && (
             <>
-              <div className="text-muted-foreground px-2 py-1 text-[10px] font-semibold uppercase tracking-wider">
+              <div className="text-muted-foreground px-2 py-1 text-2xs font-semibold uppercase tracking-wider">
                 {t("builtinTools")}
               </div>
               {grouped.builtin.map((t) => (
@@ -167,7 +158,7 @@ export function ToolNameSelect({
                   className="hover:bg-accent hover:text-accent-foreground flex w-full cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-hidden select-none"
                 >
                   <span className="truncate">{t.displayName}</span>
-                  <code className="text-muted-foreground text-[10px]">{t.name}</code>
+                  <code className="text-muted-foreground text-2xs">{t.name}</code>
                 </button>
               ))}
             </>

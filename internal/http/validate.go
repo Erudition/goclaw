@@ -3,6 +3,8 @@ package http
 import (
 	"log/slog"
 	"regexp"
+
+	"github.com/nextlevelbuilder/goclaw/internal/audio"
 )
 
 var slugRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
@@ -27,6 +29,13 @@ func filterAllowedKeys(updates map[string]any, allowed map[string]bool) map[stri
 	return filtered
 }
 
+// validateAgentTTSParams is a thin wrapper around audio.ValidateAgentTTSParams
+// so HTTP handlers can call it without importing the audio package directly.
+// The allow-list is owned by internal/audio (single source of truth, Action D).
+func validateAgentTTSParams(ttsParams map[string]any) error {
+	return audio.ValidateAgentTTSParams(ttsParams)
+}
+
 // --- Field allowlists for update endpoints ---
 // Each map lists the columns that HTTP clients may update.
 // Immutable fields (id, owner_id, created_at, deleted_at) are excluded.
@@ -40,6 +49,11 @@ var agentAllowedFields = map[string]bool{
 	"memory_config": true, "other_config": true, "tools_config": true,
 	"sandbox_config": true, "context_pruning": true,
 	"is_default": true, "budget_monthly_cents": true, "subagents_config": true,
+	// Promoted from other_config
+	"emoji": true, "agent_description": true, "thinking_level": true, "max_tokens": true,
+	"self_evolve": true, "skill_evolve": true, "skill_nudge_interval": true,
+	"reasoning_config": true, "workspace_sharing": true, "chatgpt_oauth_routing": true,
+	"shell_deny_groups": true, "kg_dedup_config": true,
 }
 
 var providerAllowedFields = map[string]bool{

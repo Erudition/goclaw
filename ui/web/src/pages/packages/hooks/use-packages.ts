@@ -10,10 +10,22 @@ export interface PackageInfo {
   version: string;
 }
 
+// Viewer-safe projection — mirrors GitHubPackageListEntry on the Go side.
+// asset_url / sha256 / asset_name are deliberately stripped from the list
+// response and are not exposed to viewer-level callers.
+export interface GitHubPackageInfo {
+  name: string;
+  repo: string;
+  tag: string;
+  binaries: string[];
+  installed_at: string;
+}
+
 export interface InstalledPackages {
   system: PackageInfo[] | null;
   pip: PackageInfo[] | null;
   npm: PackageInfo[] | null;
+  github?: GitHubPackageInfo[] | null;
 }
 
 interface InstallResult {
@@ -30,7 +42,7 @@ export function usePackages() {
   const { data, isFetching: loading, refetch } = useQuery({
     queryKey: queryKeys.packages.all,
     queryFn: () => http.get<InstalledPackages>("/v1/packages"),
-    staleTime: 30_000,
+    staleTime: 60_000,
     enabled: connected,
   });
 

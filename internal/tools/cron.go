@@ -142,14 +142,18 @@ func (t *CronTool) Execute(ctx context.Context, args map[string]any) *Result {
 		return ErrorResult("action parameter is required")
 	}
 
-	// Group write permission check for mutation actions
+	// Group cron permission check for mutation actions
 	if t.permStore != nil && (action == "add" || action == "update" || action == "remove") {
-		if err := store.CheckFileWriterPermission(ctx, t.permStore); err != nil {
-			return ErrorResult("permission denied: only file writers can manage cron jobs in group chats")
+		if err := store.CheckCronPermission(ctx, t.permStore); err != nil {
+			return ErrorResult("permission denied: only users with cron or file_writer permission can manage cron jobs in group chats")
 		}
 	}
 
 	agentID := resolveAgentIDString(ctx)
+	// SCOPE-intentional (#915 audit 2026-04-16): cron jobs follow the per-group
+	// memory model — all group members share the same cron_jobs rows via the
+	// group-scope user_id. Migrating to ActorIDFromContext would split jobs
+	// per-individual and break collaborative /cron list/add/remove UX.
 	userID := store.UserIDFromContext(ctx)
 
 	switch action {

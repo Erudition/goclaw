@@ -22,8 +22,19 @@ func (l *Loop) emit(event AgentEvent) {
 	}
 }
 
-// ID returns the agent's identifier.
+// ID returns the agent's identifier (agent_key, e.g. "goctech-leader").
+// Use for logs, UI, filesystem paths. NEVER for DB FK or DomainEvent.AgentID.
+// See docs/agent-identity-conventions.md.
 func (l *Loop) ID() string { return l.id }
+
+// UUID returns the agent's canonical UUID (DB primary key).
+// Use for SQL WHERE/JOIN, DomainEvent.AgentID, context propagation.
+// See docs/agent-identity-conventions.md.
+func (l *Loop) UUID() uuid.UUID { return l.agentUUID }
+
+// OtherConfig returns the agent's other_config JSONB (extensibility bag).
+// Used for per-agent TTS voice override (tts_voice_id, tts_model_id).
+func (l *Loop) OtherConfig() json.RawMessage { return l.agentOtherConfig }
 
 // Model returns the model identifier for this agent loop.
 func (l *Loop) Model() string { return l.model }

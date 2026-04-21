@@ -9,9 +9,11 @@ import (
 	"log/slog"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
+	"github.com/nextlevelbuilder/goclaw/internal/eventbus"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
 // isUserFilePopulated checks if USER.md has been filled with actual user data
@@ -41,6 +43,14 @@ func (l *Loop) finalizeRun(
 	hadBootstrap bool,
 	toolTiming ToolTimingMap,
 ) *RunResult {
+	// Extract MEDIA:<path> tokens the LLM echoed in its final response
+	// BEFORE sanitize strips them. Covers cases where a tool returned its
+	// artifact via the ForLLM MEDIA: prefix but the agent relayed it as plain
+	// text (e.g. PDF from exec/weasyprint, TTS mp3 paths the LLM quotes back).
+	if extracted := extractMediaFromContent(rs.finalContent, tools.ToolWorkspaceFromCtx(ctx)); len(extracted) > 0 {
+		rs.mediaResults = append(rs.mediaResults, extracted...)
+	}
+
 	// 5. Full sanitization pipeline (matching TS extractAssistantText + sanitizeUserFacingText)
 	rs.finalContent = SanitizeAssistantContent(rs.finalContent)
 
@@ -195,8 +205,26 @@ func (l *Loop) finalizeRun(
 	// 9. Maybe summarize
 	l.maybeSummarize(ctx, req.SessionKey)
 
+	// V3: emit session.completed for consolidation pipeline (episodic → semantic → dreaming)
+	if l.domainBus != nil {
+		l.domainBus.Publish(eventbus.DomainEvent{
+			Type:     eventbus.EventSessionCompleted,
+			TenantID: l.tenantID.String(),
+			AgentID:  l.agentUUID.String(),
+			UserID:   req.UserID,
+			SourceID: req.SessionKey,
+			Payload: &eventbus.SessionCompletedPayload{
+				SessionKey:      req.SessionKey,
+				MessageCount:    len(history) + len(rs.pendingMsgs),
+				TokensUsed:      rs.totalUsage.PromptTokens + rs.totalUsage.CompletionTokens,
+				CompactionCount: l.sessions.GetCompactionCount(ctx, req.SessionKey),
+			},
+		})
+	}
+
 	return &RunResult{
 		Content:        rs.finalContent,
+		Thinking:       rs.finalThinking,
 		RunID:          req.RunID,
 		Iterations:     rs.iteration,
 		Usage:          &rs.totalUsage,

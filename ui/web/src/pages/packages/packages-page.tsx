@@ -7,6 +7,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { usePackages, type PackageInfo } from "./hooks/use-packages";
 import { usePackageRuntimes } from "./hooks/use-package-runtimes";
+import { GitHubBinariesSection } from "./github-binaries-section";
 
 type ActionStatus = "idle" | "loading" | "success" | "error";
 
@@ -47,7 +48,7 @@ export function PackagesPage() {
             {hasMissingRuntimes && <p>{t("runtimes.minimalImageHint")}</p>}
           </AlertDescription>
         </Alert>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
           {runtimes?.runtimes?.map((rt) => (
             <div
               key={rt.name}
@@ -102,6 +103,12 @@ export function PackagesPage() {
         loading={loading}
         onInstall={(pkg) => installPackage(`npm:${pkg}`, t)}
         onUninstall={(pkg) => uninstallPackage(`npm:${pkg}`, t)}
+      />
+
+      <GitHubBinariesSection
+        packages={packages?.github}
+        onInstall={(pkg) => installPackage(pkg, t)}
+        onUninstall={(pkg) => uninstallPackage(pkg, t)}
       />
     </div>
   );

@@ -133,14 +133,7 @@ No skill is created without explicit user approval ("save as skill" or "skip").
 
 Both stored in `agents.other_config` JSONB. Parsed by `ParseSkillEvolve()` and `ParseSkillNudgeInterval()` in `agent_store.go`.
 
-**Predefined agents only.** Enforced at resolver level:
-
-```go
-// resolver.go:346
-SkillEvolve: ag.AgentType == "predefined" && ag.ParseSkillEvolve(),
-```
-
-Open agents always get `skillEvolve=false` regardless of DB setting.
+**Predefined agents only.** Enforced at the resolver level: `SkillEvolve` is set to `true` only when `AgentType == "predefined"` and the `skill_evolve` config flag is enabled. Open agents always get `skillEvolve=false` regardless of DB setting.
 
 **UI:** Config tab → Skill Learning section (toggle + interval input).
 
@@ -254,8 +247,8 @@ reusable skill? Reply "save as skill" or "skip"._
 
 When `skill_evolve=false`, `skill_manage` is completely hidden from the LLM:
 
-1. **API params** (`loop.go:528-537`): filtered from `toolDefs` before sending to provider
-2. **System prompt tooling** (`loop_history.go:135-144`): filtered from `toolNames` used in prompt construction
+1. **API params**: filtered from `toolDefs` before sending to provider
+2. **System prompt tooling**: filtered from `toolNames` used in prompt construction
 
 The tool remains in the shared registry (admin can see it) but the agent has zero awareness of it.
 
@@ -504,33 +497,153 @@ When both features are disabled (default), zero token overhead.
 
 ## 7. File Reference
 
-| File | Purpose |
-|------|---------|
-| `internal/agent/systemprompt.go` | `buildSelfEvolveSection()`, `buildSkillsSection()` |
-| `internal/agent/loop.go` | Budget nudges (70%/90%), postscript, tool gating |
-| `internal/agent/loop_history.go` | `HasSkillManage` flag, tool name filtering |
-| `internal/agent/resolver.go` | Predefined-only enforcement for both features |
-| `internal/store/agent_store.go` | `ParseSelfEvolve()`, `ParseSkillEvolve()`, `ParseSkillNudgeInterval()` |
-| `internal/tools/skill_manage.go` | `skill_manage` tool (create/patch/delete) |
-| `internal/tools/publish_skill.go` | `publish_skill` tool (directory-based) |
-| `internal/tools/context_file_interceptor.go` | SOUL.md write validation for self-evolve |
-| `internal/skills/guard.go` | Content security scanner (25 regex rules) |
-| `internal/store/pg/skills_crud.go` | `CreateSkillManaged`, `GetNextVersionLocked`, advisory lock |
-| `internal/store/pg/skills_content.go` | `GetSkillOwnerID`, `GetSkillOwnerIDBySlug` |
-| `internal/store/pg/skills_grants.go` | Grant/revoke operations, visibility auto-promotion |
-| `internal/http/skills.go` | HTTP skill management endpoints |
-| `internal/http/skills_grants.go` | HTTP grant/revoke endpoints |
-| `internal/gateway/methods/skills.go` | WebSocket skill methods |
-| `internal/i18n/keys.go` | `MsgSkillNudgePostscript`, `MsgSkillNudge70Pct`, `MsgSkillNudge90Pct` |
-| `internal/i18n/catalog_en.go` | English nudge translations |
-| `internal/i18n/catalog_vi.go` | Vietnamese nudge translations |
-| `internal/i18n/catalog_zh.go` | Chinese nudge translations |
-| `cmd/gateway_builtin_tools.go` | `skill_manage` builtin tool seed entry |
+| Module | Path | Purpose |
+|---|---|---|
+| Agent loop & system prompt | `internal/agent/systemprompt.go`, `internal/agent/loop.go`, `internal/agent/loop_history.go`, `internal/agent/resolver.go` | Self-evolve/skill sections, budget nudges, tool gating, predefined-only enforcement |
+| Skill tools & security | `internal/tools/skill_manage.go`, `internal/tools/publish_skill.go`, `internal/tools/context_file_interceptor.go`, `internal/skills/guard.go` | skill_manage/publish_skill tools, SOUL.md validation, content security scanner |
+| Skill store, HTTP & gateway | `internal/store/pg/skills_*.go`, `internal/http/skills*.go`, `internal/gateway/methods/skills.go`, `internal/store/agent_store.go` | Skill CRUD, grants, versioning, HTTP + WS methods, ParseSkillEvolve helpers |
+| Evolution metrics & i18n | `internal/agent/suggestion_engine.go`, `internal/agent/evolution_guardrails.go`, `internal/store/pg/evolution_*.go`, `internal/i18n/`, `cmd/gateway_evolution_cron.go` | SuggestionEngine, guardrails, metrics/suggestions persistence, nudge translations, cron |
+
+Use `grep` or your editor's symbol search for specific files.
 
 ---
 
-## 8. Cross-References
+## 8. Agent Evolution Metrics System (V3)
+
+V3 introduces automated agent improvement via metrics-driven suggestions. Agents track tool usage, retrieval performance, and user feedback to generate actionable evolution recommendations.
+
+### 8.1 Metrics Collection
+
+Metrics are recorded during agent execution and stored per-agent in the database. Three metric types:
+
+| Type | Description | Examples |
+|------|-------------|----------|
+| **tool** | Tool invocation performance | invocation_count, success_rate, failure_count, avg_duration_ms |
+| **retrieval** | Knowledge retrieval quality | recall_rate, precision, relevance_score, query_count |
+| **feedback** | User satisfaction signals | rating, sentiment, effectiveness_score |
+
+**Collection points:**
+- Tool execution: name, status (success/failure), duration recorded in agent loop
+- Retrieval queries: recall metrics computed from vector search results
+- User feedback: optional post-run feedback API or implicit signals (abort/rephrase patterns)
+
+Metrics aggregate over 7-day rolling windows for suggestion analysis.
+
+### 8.2 Suggestion Engine
+
+`SuggestionEngine` analyzes aggregated metrics and generates suggestions via pluggable rules.
+
+**Architecture:**
+
+```
+Metrics Aggregation (7-day window)
+    ↓
+Rule Evaluation (run daily/weekly)
+    ├─ LowRetrievalUsageRule
+    ├─ ToolFailureRule
+    └─ RepeatedToolRule
+    ↓
+Suggestion Creation (pending status)
+    ↓
+Admin Review → Approve/Reject/Rollback
+```
+
+**Suggestion Types:**
+
+| Type | Trigger | Recommendation | Parameters |
+|------|---------|-----------------|------------|
+| `low_retrieval_usage` | Avg recall < threshold for 7 days | Lower `retrieval_threshold` parameter | `{current_threshold, proposed_threshold, confidence}` |
+| `tool_failure` | Single tool failure rate > 20% | Review tool config or fallback | `{tool_name, failure_count, success_count}` |
+| `repeated_tool` | Tool called 5+ consecutive times without context change | Consider extracting as skill | `{tool_name, occurrence_count, pattern_score}` |
+
+**Duplicate Prevention:** Only one pending suggestion per type per agent. New analyses skip rules that already have pending suggestions.
+
+### 8.3 Auto-Adapt Guardrails
+
+Suggestions can be auto-applied with safety constraints (optional admin-enabled). Guardrails prevent runaway adaptation.
+
+**Constraints:**
+
+| Name | Default | Purpose |
+|------|---------|---------|
+| `max_delta_per_cycle` | 0.1 | Max parameter change per apply cycle (prevents aggressive swings) |
+| `min_data_points` | 100 | Minimum metrics before applying (avoid overfitting on small sample) |
+| `rollback_on_drop_pct` | 20.0 | Auto-rollback if quality metric drops >20% after apply |
+| `locked_params` | `[]` | Parameters that cannot be auto-changed (e.g., security settings) |
+
+**Apply Flow:**
+
+1. Admin approves `low_retrieval_usage` suggestion (raises `retrieval_threshold` by +0.05)
+2. System checks: min_data_points met? parameter not locked? delta ≤ 0.1? → OK
+3. Baseline values saved for rollback
+4. Suggestion status → `applied`
+5. Monitor: if recall drops >20%, auto-rollback and set status → `rolled_back`
+
+**Baseline Storage:**
+
+Previous parameter values stored in suggestion `parameters._baseline` for rollback:
+
+```json
+{
+  "current_threshold": 0.5,
+  "proposed_threshold": 0.55,
+  "_baseline": {
+    "retrieval_threshold": 0.5
+  }
+}
+```
+
+### 8.4 Cron Scheduling
+
+Evolution analysis runs as a periodic cron job (default: daily).
+
+**Schedule:** Configurable via `evolution_cron_schedule` in agent config. Examples: `every day at 02:00`, `every 7 days at sunday 02:00`.
+
+**Execution:**
+1. Load all agents in tenant
+2. For each agent: `engine.Analyze(ctx, agentID)`
+3. Create pending suggestions (if new findings detected)
+4. Log results: created suggestions count, skipped rules, errors
+
+**Cron Event:** `evolution.analysis.completed` event emitted on completion.
+
+### 8.5 API & WebSocket
+
+**HTTP Endpoints** (see [18 — HTTP REST API](18-http-api.md#14-evolution-metrics--suggestions)):
+- `GET /v1/agents/{agentID}/evolution/metrics` — Query/aggregate metrics
+- `GET /v1/agents/{agentID}/evolution/suggestions` — List suggestions
+- `PATCH /v1/agents/{agentID}/evolution/suggestions/{suggestionID}` — Approve/reject/rollback
+
+**WebSocket Methods** (see [19 — WebSocket RPC](19-websocket-rpc.md)):
+- `agent.evolution.metrics` — Get metrics
+- `agent.evolution.suggestions` — List suggestions
+- `agent.evolution.apply` — Apply suggestion
+- `agent.evolution.rollback` — Rollback applied suggestion
+
+### 8.6 Configuration
+
+Per-agent evolution settings stored in `agents.other_config` JSONB:
+
+```json
+{
+  "evolution_enabled": true,
+  "evolution_guardrails": {
+    "max_delta_per_cycle": 0.1,
+    "min_data_points": 100,
+    "rollback_on_drop_pct": 20.0,
+    "locked_params": ["security_level"]
+  }
+}
+```
+
+Defaults used if keys absent. Set `evolution_enabled: false` to disable metrics collection entirely.
+
+---
+
+## 9. Cross-References
 
 - [14 - Skills Runtime](./14-skills-runtime.md) — Python/Node runtime environment for skill scripts
 - [15 - Core Skills System](./15-core-skills-system.md) — Bundled system skills, startup seeding, dependency checking
 - [16 - Skill Publishing System](./16-skill-publishing.md) — `publish_skill` tool and `skill-creator` core skill
+- [19 - WebSocket RPC Methods](./19-websocket-rpc.md) — V3 WebSocket methods for evolution, episodic, vault
+- [18 - HTTP REST API](./18-http-api.md) — HTTP REST endpoints for evolution metrics, suggestions, episodic memory, vault documents

@@ -9,6 +9,7 @@ export interface AgentListItem {
   display_name?: string
   model?: string
   provider?: string
+  emoji?: string | null
   other_config?: Record<string, unknown> | null
 }
 
@@ -35,6 +36,10 @@ export const agentService = {
 
   resummon(id: string): Promise<void> {
     return getApiClient().post<void>(`/v1/agents/${id}/resummon`, {})
+  },
+
+  cancelSummon(id: string): Promise<void> {
+    return getApiClient().post<void>(`/v1/agents/${id}/cancel-summon`, {})
   },
 
   resummonWs(agentId: string): Promise<unknown> {

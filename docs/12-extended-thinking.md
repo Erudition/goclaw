@@ -227,7 +227,43 @@ OpenAI-compatible providers handle thinking/reasoning content as metadata. The `
 
 ---
 
-## 6. Observability
+## 6. Reasoning Content Stripping (Phase 6 — OpenClaw TS port)
+
+Some models emit chain-of-thought reasoning tokens even when `effort="off"` is specified. To prevent that raw CoT from reaching end users, GoClaw supports a `StripThinking` flag on `ReasoningDecision`.
+
+### Models Known to Leak CoT
+
+Auto-flagged via `modelLeaksReasoning(model)` in `internal/providers/reasoning_resolution.go`:
+- **Kimi family**: any model name containing `kimi` (case-insensitive, e.g. `kimi-k2`, `moonshot/kimi-k2-thinking`)
+- **DeepSeek-Reasoner**: any model name containing `deepseek-reasoner`
+
+The allowlist is a simple substring check — extendable as new leaky models appear.
+
+### Auto-Enable Flow
+
+1. `ResolveReasoningDecision` runs its normal flow, then a `defer` checks: if `EffectiveEffort == "off" && modelLeaksReasoning(model)`, it sets `decision.StripThinking = true`.
+2. The agent loop (`loop_pipeline_callbacks.go`) reads `decision.StripThinking` and propagates it into `chatReq.Options[providers.OptStripThinking] = true`.
+3. Each provider's streaming handler reads `OptStripThinking` from options at the top of `ChatStream`/`Chat` and applies guard clauses.
+
+### Implementation Per Provider
+
+- **Anthropic** (`anthropic_stream.go`, `anthropic.go`): `thinking_delta` events skip `result.Thinking` accumulation AND the `onChunk` emit when stripping, but `thinkingChars` still increments so `Usage.ThinkingTokens` stays billable. `RawAssistantContent` (content blocks for tool-use passback) is never touched. Non-streaming `Chat()` clears `resp.Thinking` post-parse.
+- **OpenAI** (`openai_chat.go`): streaming guards `reasoning`/`reasoning_content` delta accumulation; non-streaming clears `resp.Thinking` post-parse. `Usage.ThinkingTokens` read from the usage chunk independently.
+- **Codex** (`codex.go`): `processSSEEvent` takes an extra `stripThinking bool` param; the `reasoning` item case skips summary text appending when set. Usage still extracted from `response.completed`.
+- **DashScope**: inherits both guards via `OpenAIProvider` embedding — no separate implementation needed.
+
+### Invariants Preserved
+
+| Field | Stripping effect | Rationale |
+|---|---|---|
+| `ChatResponse.Thinking` | Cleared | User-visible output |
+| `Usage.ThinkingTokens` | **Unchanged** | Billing accuracy (Phase 1 depends on it) |
+| `RawAssistantContent` | **Unchanged** | Anthropic tool-use replay requires raw thinking blocks |
+| `onChunk(StreamChunk{Thinking})` | Not emitted | Streaming UI display |
+
+---
+
+## 7. Observability
 
 Each LLM span can now include a `metadata.reasoning` section with:
 - `source`
@@ -244,18 +280,13 @@ This makes silent downgrades or provider-default decisions visible in traces ins
 
 ## File Reference
 
-| File | Purpose |
-|------|---------|
-| `internal/providers/types.go` | ThinkingCapable interface, StreamChunk.Thinking field, Opt* thinking constants |
-| `internal/providers/anthropic.go` | Anthropic: budget mapping (4K/10K/32K), beta header injection, temperature stripping |
-| `internal/providers/anthropic_stream.go` | Anthropic streaming: thinking_delta handling, raw block accumulation |
-| `internal/providers/anthropic_request.go` | Anthropic request: thinking block preservation for tool loops |
-| `internal/providers/openai.go` | OpenAI-compat: reasoning_effort mapping, reasoning_content streaming |
-| `internal/providers/reasoning_capability.go` | Static GPT-5/Codex capability registry |
-| `internal/providers/reasoning_resolution.go` | Requested-to-effective reasoning decision engine |
-| `internal/providers/reasoning_observation.go` | Trace metadata merge helpers for reasoning decisions |
-| `internal/providers/dashscope.go` | DashScope: model-specific thinking guard, budget mapping, tools+streaming fallback |
-| `internal/providers/codex.go` | Codex: reasoning event streaming, OutputTokensDetails.ReasoningTokens tracking |
+| Module | Path | Purpose |
+|---|---|---|
+| Provider types & reasoning | `internal/providers/types.go`, `internal/providers/reasoning_capability.go`, `internal/providers/reasoning_resolution.go`, `internal/providers/reasoning_observation.go` | ThinkingCapable interface, GPT-5/Codex capability registry, reasoning decision engine, trace metadata |
+| Anthropic thinking | `internal/providers/anthropic.go`, `internal/providers/anthropic_stream.go`, `internal/providers/anthropic_request.go` | Budget mapping, beta header, thinking_delta streaming, block preservation for tool loops |
+| OpenAI-compat, DashScope & Codex | `internal/providers/openai.go`, `internal/providers/dashscope.go`, `internal/providers/codex.go` | Reasoning effort mapping, DashScope tools+streaming fallback, Codex reasoning event streaming |
+
+Use `grep` or your editor's symbol search for specific files.
 
 ---
 

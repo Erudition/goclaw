@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/audio"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/typing"
@@ -25,23 +27,21 @@ type Channel struct {
 	session         *discordgo.Session
 	config          config.DiscordConfig
 	botUserID       string   // populated on start
-	requireMention  bool     // require @bot mention in groups (default true)
 	placeholders    sync.Map // placeholderKey string → messageID string
 	typingCtrls     sync.Map // channelID string → *typing.Controller
-	pairingService  store.PairingStore
-	pairingDebounce sync.Map // senderID → time.Time
-	approvedGroups  sync.Map // chatID → true (in-memory cache for paired groups)
-	groupHistory    *channels.PendingHistory
-	historyLimit    int
 	agentStore      store.AgentStore            // for agent key lookup (nil = writer commands disabled)
 	configPermStore store.ConfigPermissionStore // for group file writer management (nil = writer commands disabled)
+	audioMgr        *audio.Manager             // unified STT via audio.Manager (nil = no STT)
+	// pairingService, pairingDebounce, approvedGroups, groupHistory, historyLimit, requireMention
+	// are inherited from channels.BaseChannel.
 }
 
 // New creates a new Discord channel from config.
 // agentStore and configPermStore are optional (nil = writer commands disabled).
+// audioMgr is optional (nil = STT disabled).
 func New(cfg config.DiscordConfig, msgBus *bus.MessageBus, pairingSvc store.PairingStore,
 	agentStore store.AgentStore, configPermStore store.ConfigPermissionStore,
-	pendingStore store.PendingMessageStore) (*Channel, error) {
+	pendingStore store.PendingMessageStore, audioMgr *audio.Manager) (*Channel, error) {
 	session, err := discordgo.New("Bot " + cfg.Token)
 	if err != nil {
 		return nil, fmt.Errorf("create discord session: %w", err)
@@ -65,22 +65,24 @@ func New(cfg config.DiscordConfig, msgBus *bus.MessageBus, pairingSvc store.Pair
 		historyLimit = channels.DefaultGroupHistoryLimit
 	}
 
-	return &Channel{
+	ch := &Channel{
 		BaseChannel:     base,
 		session:         session,
 		config:          cfg,
-		requireMention:  requireMention,
-		pairingService:  pairingSvc,
-		groupHistory:    channels.MakeHistory(channels.TypeDiscord, pendingStore, base.TenantID()),
-		historyLimit:    historyLimit,
 		agentStore:      agentStore,
 		configPermStore: configPermStore,
-	}, nil
+		audioMgr:        audioMgr,
+	}
+	ch.SetRequireMention(requireMention)
+	ch.SetPairingService(pairingSvc)
+	ch.SetGroupHistory(channels.MakeHistory(channels.TypeDiscord, pendingStore, base.TenantID()))
+	ch.SetHistoryLimit(historyLimit)
+	return ch, nil
 }
 
 // Start opens the Discord gateway connection and begins receiving events.
 func (c *Channel) Start(_ context.Context) error {
-	c.groupHistory.StartFlusher()
+	c.GroupHistory().StartFlusher()
 	slog.Info("starting discord bot")
 
 	c.session.AddHandler(c.handleMessage)
@@ -108,22 +110,28 @@ func (c *Channel) BlockReplyEnabled() *bool { return c.config.BlockReply }
 
 // SetPendingCompaction configures LLM-based auto-compaction for pending messages.
 func (c *Channel) SetPendingCompaction(cfg *channels.CompactionConfig) {
-	c.groupHistory.SetCompactionConfig(cfg)
+	if gh := c.GroupHistory(); gh != nil {
+		gh.SetCompactionConfig(cfg)
+	}
 }
 
 // SetPendingHistoryTenantID propagates tenant_id to the pending history for DB operations.
-func (c *Channel) SetPendingHistoryTenantID(id uuid.UUID) { c.groupHistory.SetTenantID(id) }
+func (c *Channel) SetPendingHistoryTenantID(id uuid.UUID) {
+	if gh := c.GroupHistory(); gh != nil {
+		gh.SetTenantID(id)
+	}
+}
 
 // Stop closes the Discord gateway connection.
 func (c *Channel) Stop(_ context.Context) error {
-	c.groupHistory.StopFlusher()
+	c.GroupHistory().StopFlusher()
 	slog.Info("stopping discord bot")
 	c.SetRunning(false)
 	return c.session.Close()
 }
 
 // Send delivers an outbound message to a Discord channel.
-func (c *Channel) Send(_ context.Context, msg bus.OutboundMessage) (err error) {
+func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) (err error) {
 	if !c.IsRunning() {
 		return fmt.Errorf("discord bot not running")
 	}
@@ -145,8 +153,9 @@ func (c *Channel) Send(_ context.Context, msg bus.OutboundMessage) (err error) {
 	// but keep it alive for the final response. Don't stop typing or cleanup.
 	if msg.Metadata["placeholder_update"] == "true" {
 		if pID, ok := c.placeholders.Load(placeholderKey); ok {
-			msgID := pID.(string)
-			_, _ = c.session.ChannelMessageEdit(channelID, msgID, msg.Content)
+			if msgID, ok := pID.(string); ok {
+				_, _ = c.session.ChannelMessageEdit(channelID, msgID, msg.Content)
+			}
 		}
 		return nil
 	}
@@ -158,12 +167,50 @@ func (c *Channel) Send(_ context.Context, msg bus.OutboundMessage) (err error) {
 
 	content := msg.Content
 
+	// TTS auto-apply: convert [[tts]] tagged responses to voice
+	if c.audioMgr != nil && content != "" {
+		isVoiceInbound := msg.Metadata["is_voice_inbound"] == "true"
+		ttsResult, ttsErr := c.audioMgr.AutoApplyToText(ctx, content, "discord", isVoiceInbound, "")
+		if ttsErr != nil {
+			slog.Debug("discord: tts auto-apply error", "error", ttsErr)
+		}
+		if ttsResult != nil && ttsResult.AudioPath != "" {
+			// Send voice file via media API
+			if err := c.sendMediaMessage(channelID, "", []bus.MediaAttachment{{
+				URL:         ttsResult.AudioPath,
+				ContentType: ttsResult.AudioMime,
+			}}); err != nil {
+				slog.Warn("discord: tts auto-apply voice send failed, falling back to text", "error", err)
+			} else {
+				// Voice sent successfully
+				strippedText := strings.TrimSpace(ttsResult.Text)
+				if strippedText == "" {
+					// Voice-only: delete placeholder (no text to show)
+					if pID, ok := c.placeholders.LoadAndDelete(placeholderKey); ok {
+						if msgID, ok := pID.(string); ok {
+							_ = c.session.ChannelMessageDelete(channelID, msgID)
+						}
+					}
+					return nil
+				}
+				// Has remaining text: let normal flow handle placeholder edit
+				content = strippedText
+			}
+		}
+		// Update content with directives stripped (even if TTS not applied)
+		if ttsResult != nil {
+			content = ttsResult.Text
+		}
+	}
+
 	// Handle outbound media attachments: send files via Discord's file upload API.
 	if len(msg.Media) > 0 {
 		// Delete placeholder if present
 		if pID, ok := c.placeholders.Load(placeholderKey); ok {
 			c.placeholders.Delete(placeholderKey)
-			_ = c.session.ChannelMessageDelete(channelID, pID.(string))
+			if msgID, ok := pID.(string); ok {
+				_ = c.session.ChannelMessageDelete(channelID, msgID)
+			}
 		}
 		return c.sendMediaMessage(channelID, content, msg.Media)
 	}
@@ -173,8 +220,9 @@ func (c *Channel) Send(_ context.Context, msg bus.OutboundMessage) (err error) {
 	if content == "" {
 		if pID, ok := c.placeholders.Load(placeholderKey); ok {
 			c.placeholders.Delete(placeholderKey)
-			msgID := pID.(string)
-			_ = c.session.ChannelMessageDelete(channelID, msgID)
+			if msgID, ok := pID.(string); ok {
+				_ = c.session.ChannelMessageDelete(channelID, msgID)
+			}
 		}
 		return nil
 	}
@@ -183,31 +231,31 @@ func (c *Channel) Send(_ context.Context, msg bus.OutboundMessage) (err error) {
 	// then send the rest as follow-up messages.
 	if pID, ok := c.placeholders.Load(placeholderKey); ok {
 		c.placeholders.Delete(placeholderKey)
-		msgID := pID.(string)
+		if msgID, ok := pID.(string); ok {
+			const maxLen = 2000
+			editContent := content
+			remaining := ""
 
-		const maxLen = 2000
-		editContent := content
-		remaining := ""
-
-		if len(editContent) > maxLen {
-			// Break at a newline if possible
-			cutAt := maxLen
-			if idx := lastIndexByte(content[:maxLen], '\n'); idx > maxLen/2 {
-				cutAt = idx + 1
+			if len(editContent) > maxLen {
+				// Break at a newline if possible
+				cutAt := maxLen
+				if idx := lastIndexByte(content[:maxLen], '\n'); idx > maxLen/2 {
+					cutAt = idx + 1
+				}
+				editContent = content[:cutAt]
+				remaining = content[cutAt:]
 			}
-			editContent = content[:cutAt]
-			remaining = content[cutAt:]
-		}
 
-		if _, editErr := c.session.ChannelMessageEdit(channelID, msgID, editContent); editErr == nil {
-			// Send remaining content as follow-up messages
-			if remaining != "" {
-				return c.sendChunked(channelID, remaining)
+			if _, editErr := c.session.ChannelMessageEdit(channelID, msgID, editContent); editErr == nil {
+				// Send remaining content as follow-up messages
+				if remaining != "" {
+					return c.sendChunked(channelID, remaining)
+				}
+				return nil
+			} else {
+				slog.Warn("discord: placeholder edit failed, sending new message",
+					"channel_id", channelID, "placeholder_id", msgID, "error", editErr)
 			}
-			return nil
-		} else {
-			slog.Warn("discord: placeholder edit failed, sending new message",
-				"channel_id", channelID, "placeholder_id", msgID, "error", editErr)
 		}
 		// Fall through to send new message if edit fails
 	}
@@ -217,23 +265,11 @@ func (c *Channel) Send(_ context.Context, msg bus.OutboundMessage) (err error) {
 }
 
 // sendChunked sends a message, splitting into multiple messages if over 2000 chars.
+// Uses markdown-aware chunking to avoid splitting inside fenced code blocks.
 func (c *Channel) sendChunked(channelID, content string) error {
 	const maxLen = 2000
 
-	for len(content) > 0 {
-		chunk := content
-		if len(chunk) > maxLen {
-			// Try to break at a newline
-			cutAt := maxLen
-			if idx := lastIndexByte(content[:maxLen], '\n'); idx > maxLen/2 {
-				cutAt = idx + 1
-			}
-			chunk = content[:cutAt]
-			content = content[cutAt:]
-		} else {
-			content = ""
-		}
-
+	for _, chunk := range channels.ChunkMarkdown(content, maxLen) {
 		if _, err := c.session.ChannelMessageSend(channelID, chunk); err != nil {
 			return fmt.Errorf("send discord message: %w", err)
 		}

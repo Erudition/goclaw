@@ -2,11 +2,162 @@
 
 ## Overview
 
-The Agent Loop implements a **Think --> Act --> Observe** cycle. Each agent owns a `Loop` instance configured with a provider, model, tools, workspace, and agent type. A user message enters as a `RunRequest`, passes through `runLoop`, and exits as a `RunResult`. The loop iterates up to 20 times: the LLM thinks, optionally calls tools, observes results, and repeats until it produces a final text response.
+The Agent Loop implements a **Think --> Act --> Observe** cycle. Each agent owns a `Loop` instance configured with a provider, model, tools, workspace, and agent type. A user message enters as a `RunRequest`, passes through the loop, and exits as a `RunResult`. 
+
+**V3 Dual Mode**: The loop supports two execution paths:
+- **V2 (monolithic)**: Original `runLoop()` function (default for backward compatibility)
+- **V3 (pipeline)**: Pluggable 8-stage pipeline (`internal/pipeline/`, enabled via feature flag)
+
+Both paths implement the same external behavior; the difference is internal architecture. The loop iterates up to 20 times: the LLM thinks, optionally calls tools, observes results, and repeats until it produces a final text response.
 
 ---
 
-## 1. RunRequest Flow
+## V3 Pipeline Architecture
+
+When `pipeline_enabled` is true, `Loop.Run()` delegates to `runViaPipeline()`, which orchestrates the v3 pipeline:
+
+```mermaid
+flowchart TD
+    RUN["Loop.Run<br/>runRequest"] --> GATE{pipeline_enabled?}
+    GATE -->|false| V2["runLoop<br/>v2 monolithic"]
+    GATE -->|true| V3["runViaPipeline<br/>v3 pipeline"]
+
+    V3 --> NEWSTATE["NewRunState<br/>input, nil, model, provider"]
+    NEWSTATE --> NEWPIPE["NewDefaultPipeline<br/>8 stages"]
+    NEWPIPE --> PIPE_RUN["Pipeline.Run<br/>setup → iteration loop → finalize"]
+
+    PIPE_RUN --> CONVERT["convertRunResult<br/>pResult → RunResult"]
+    CONVERT --> RESULT["RunResult"]
+```
+
+### Stage Execution Order
+
+```
+Setup (runs once)
+├─ ContextStage: Inject context, compute workspace, ensure per-user files
+│
+Iteration Loop (max 20 iterations)
+├─ ThinkStage: Build system prompt, filter tools, call LLM
+├─ PruneStage: Soft/hard trim context, run memory flush if needed
+├─ ToolStage: Execute tool calls (parallel)
+├─ ObserveStage: Process tool results, append messages
+└─ CheckpointStage: Check iteration state, conditionally break
+
+Finalize (runs once, uses background context if cancelled)
+└─ FinalizeStage: Sanitize output, flush messages, update metadata
+```
+
+### Stage Details
+
+**ContextStage**
+- Inject context: `WithAgentID()`, `WithUserID()`, `WithAgentType()`, `WithLocale()`
+- Resolve per-user workspace (base + sanitized userID)
+- Ensure per-user files exist (idempotent via `sync.Map` cache)
+- Persist agent/user IDs on session
+
+**ThinkStage**
+- Resolve workspace + context files dynamically
+- Build system prompt (15+ sections)
+- Inject conversation summary if exists
+- Run history pipeline (limitHistoryTurns → sanitizeHistory)
+- Filter tools through PolicyEngine (RBAC)
+- Call LLM, record span with token counts
+- Emit `chunk` events (streaming) or single response
+
+**PruneStage** (opt-in via `contextPruning.mode: "cache-ttl"`)
+- Estimate token ratio vs context window
+- If >= 25%, run soft trim pass (keep first/last 3000 chars, replace middle with "...")
+- If >= 50%, run hard clear pass (replace with placeholder)
+- Run sanitizeHistory to fix broken tool_use/tool_result pairs after prune
+- Trigger memory flush (synchronous) if compaction threshold exceeded
+
+**ToolStage**
+- Execute single tool sequentially (no goroutine overhead)
+- Execute multiple tools in parallel via goroutines, sort results by index
+- Emit `tool.call` before, `tool.result` after
+- Record tool span
+- Append tool messages to buffer
+
+**ObserveStage**
+- Process tool result stream
+- Handle `NO_REPLY` convention (silent completion)
+- Append assistant message with tool call info
+
+**CheckpointStage**
+- Increment iteration counter
+- Check if max iterations reached → `BreakLoop`
+- Check if context cancelled → `AbortRun`
+
+**FinalizeStage**
+- Run 7-step output sanitization pipeline
+- Flush buffered messages atomically
+- Update session metadata (model, provider, token counts)
+- Emit `run.completed` or `run.failed` event
+
+---
+
+## Orchestration Modes
+
+Agents support three orchestration modes that determine which inter-agent tools are available:
+
+### ModeSpawn (Default)
+- **Use case**: Single independent agent
+- **Tools available**: `spawn` (self-clone child agents)
+- **Tools hidden**: `delegate`, `team_tasks`
+- **Resolution**: Default when no team or delegate links
+
+### ModeDelegate
+- **Use case**: Agent with linked delegate targets
+- **Tools available**: `spawn`, `delegate` (dispatch to linked agents)
+- **Tools hidden**: `team_tasks`
+- **Resolution**: When `agent_links` table has rows with source = this agent
+
+### ModeTeam
+- **Use case**: Agent in a team (multiple agents collaborating)
+- **Tools available**: `spawn`, `delegate`, `team_tasks` (full team workspace)
+- **Tools hidden**: None
+- **Resolution**: When `teams` table has a row with agent_id = this agent
+
+**Mode Resolution Priority**: Team > Delegate > Spawn
+
+The system prompt includes relevant details for each mode (delegate targets, team context, shared workspace paths).
+
+---
+
+## Self-Evolution System
+
+Agents can auto-adapt their behavior based on metrics and admin-approved suggestions.
+
+### Evolution Suggestion Engine
+
+Analyzes agent metrics on a periodic schedule (cron job):
+
+1. **LowRetrievalUsageRule** — Detects if `memory_search` or `knowledge_graph_search` is underutilized; suggests enabling vault
+2. **ToolFailureRule** — Identifies frequently failing tools; suggests limiting tool set or retraining
+3. **RepeatedToolRule** — Detects repetitive tool calls (loop detection); suggests prompt adjustment
+
+### Adaptation Guardrails
+
+**AdaptationGuardrails** struct controls safety limits (stored in `agents.other_config.evolution_guardrails`):
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `max_delta_per_cycle` | 0.1 | Max parameter change per cycle (prevents wild swings) |
+| `min_data_points` | 100 | Require at least N metrics before applying suggestion |
+| `rollback_on_drop_pct` | 20.0 | Revert if quality drops >20% after applying |
+| `locked_params` | [] | Parameter names that cannot auto-change (e.g., "temperature") |
+
+### Suggestion Workflow
+
+1. **SuggestionEngine.Analyze()** evaluates rules against 7-day metrics window
+2. Generates `EvolutionSuggestion` records (status="pending")
+3. Admin reviews in dashboard, approves/rejects
+4. On approval, auto-adapt worker applies suggestion + records baseline metrics
+5. Next cycle detects quality regression and auto-rolls back if threshold exceeded
+
+---
+
+## 1. RunRequest Flow (V2 Monolithic - Original)
 
 The full lifecycle of a single agent run is broken into seven phases.
 
@@ -33,7 +184,7 @@ flowchart TD
 
     subgraph PH3["Phase 3: Build Messages"]
         P3A[Build system prompt - 15+ sections] --> P3B[Inject conversation summary if present]
-        P3B --> P3C["History pipeline: limitHistoryTurns --> pruneContextMessages --> sanitizeHistory"]
+        P3B --> P3C["History pipeline: limitHistoryTurns --> sanitizeHistory"]
         P3C --> P3D[Append current user message]
         P3D --> P3E[Buffer user message locally - deferred write]
     end
@@ -127,7 +278,7 @@ flowchart TD
 
 ### Phase 6: Response Finalization
 
-- Run `SanitizeAssistantContent` -- a 7-step cleanup pipeline (see Section 3).
+- Run the 7-step output sanitization pipeline (see Section 3).
 - Detect `NO_REPLY` in the final content. If present, suppress message delivery (silent reply).
 - Flush all buffered messages atomically to the session (user message, tool messages, assistant message). This prevents concurrent runs from interleaving partial history.
 - Update session metadata: model name, provider name, cumulative token counts.
@@ -190,31 +341,31 @@ A 7-step pipeline cleans raw LLM output before delivering it to the user.
 ```mermaid
 flowchart TD
     IN[Raw LLM Output] --> S1
-    S1["1. stripGarbledToolXML<br/>Remove broken XML tool artifacts<br/>from DeepSeek, GLM, Minimax"] --> S2
-    S2["2. stripDowngradedToolCallText<br/>Remove text-format tool calls:<br/>[Tool Call: ...], [Tool Result ...]"] --> S3
-    S3["3. stripThinkingTags<br/>Remove reasoning tags:<br/>think, thinking, thought, antThinking"] --> S4
-    S4["4. stripFinalTags<br/>Remove final tag wrappers,<br/>preserve inner content"] --> S5
-    S5["5. stripEchoedSystemMessages<br/>Remove hallucinated<br/>[System Message] blocks"] --> S6
-    S6["6. collapseConsecutiveDuplicateBlocks<br/>Deduplicate repeated paragraphs<br/>caused by model stuttering"] --> S7
-    S7["7. stripLeadingBlankLines<br/>Remove leading whitespace lines"] --> TRIM
-    TRIM["TrimSpace()"] --> OUT[Clean Output]
+    S1["1. Strip garbled tool XML<br/>Remove broken XML tool artifacts<br/>from DeepSeek, GLM, Minimax"] --> S2
+    S2["2. Strip downgraded tool call text<br/>Remove text-format tool calls:<br/>[Tool Call: ...], [Tool Result ...]"] --> S3
+    S3["3. Strip thinking tags<br/>Remove reasoning tags:<br/>think, thinking, thought, antThinking"] --> S4
+    S4["4. Strip final wrapper tags<br/>Remove final tag wrappers,<br/>preserve inner content"] --> S5
+    S5["5. Strip echoed system messages<br/>Remove hallucinated<br/>[System Message] blocks"] --> S6
+    S6["6. Collapse consecutive duplicates<br/>Deduplicate repeated paragraphs<br/>caused by model stuttering"] --> S7
+    S7["7. Strip leading blank lines<br/>Remove leading whitespace lines"] --> TRIM
+    TRIM["Trim whitespace"] --> OUT[Clean Output]
 ```
 
 ### Step Details
 
-1. **stripGarbledToolXML** -- Some models (DeepSeek, GLM, Minimax) emit tool-call XML as plain text instead of proper structured tool calls. This step removes tags like `<tool_call>`, `<function_call>`, `<tool_use>`, `<minimax:tool_call>`, and `<parameter name=...>`. If the entire response consists of garbled XML, an empty string is returned.
+1. **Garbled tool XML** — Some models (DeepSeek, GLM, Minimax) emit tool-call XML as plain text instead of proper structured tool calls. Tags like `<tool_call>`, `<function_call>`, `<tool_use>`, `<minimax:tool_call>`, and `<parameter name=...>` are stripped. If the entire response consists of garbled XML, an empty string is returned.
 
-2. **stripDowngradedToolCallText** -- Removes text-format tool calls such as `[Tool Call: ...]`, `[Tool Result ...]`, and `[Historical context: ...]` along with any accompanying JSON arguments and output. Uses line-by-line scanning because Go regex does not support lookahead.
+2. **Downgraded tool call text** — Text-format tool calls such as `[Tool Call: ...]`, `[Tool Result ...]`, and `[Historical context: ...]` are removed along with any accompanying JSON arguments. Scanning is line-by-line.
 
-3. **stripThinkingTags** -- Removes internal reasoning tags: `<think>`, `<thinking>`, `<thought>`, `<antThinking>`. Case-insensitive, non-greedy matching.
+3. **Thinking tags** — Internal reasoning tags (`<think>`, `<thinking>`, `<thought>`, `<antThinking>`) are stripped. Case-insensitive, non-greedy matching.
 
-4. **stripFinalTags** -- Removes `<final>` and `</final>` wrapper tags but preserves the content inside them.
+4. **Final wrapper tags** — `<final>` and `</final>` wrapper tags are removed while the inner content is preserved.
 
-5. **stripEchoedSystemMessages** -- Removes `[System Message]` blocks that the LLM hallucinates or echoes in its response. Scans line by line, skipping content until an empty line is reached.
+5. **Echoed system messages** — `[System Message]` blocks that the LLM hallucinates or echoes back are stripped by scanning line by line until an empty line is reached.
 
-6. **collapseConsecutiveDuplicateBlocks** -- Removes paragraphs that repeat consecutively (a symptom of model stuttering). Splits by `\n\n` and compares each trimmed block against its predecessor.
+6. **Consecutive duplicate blocks** — Paragraphs that repeat back-to-back (model stuttering) are collapsed. Each block is compared against its predecessor after splitting on `\n\n`.
 
-7. **stripLeadingBlankLines** -- Removes whitespace-only lines at the beginning of the output while preserving indentation in the remaining content.
+7. **Leading blank lines** — Whitespace-only lines at the start of the output are removed while preserving indentation in the remaining content.
 
 ---
 
@@ -248,25 +399,20 @@ All security events use the `slog.Warn("security.injection_detected")` conventio
 
 ## 5. History Pipeline
 
-The history pipeline prepares conversation history before sending it to the LLM. It runs in three sequential stages.
+The history pipeline prepares conversation history before sending it to the LLM. It runs in two sequential stages. Context pruning is handled separately by PruneStage (opt-in via `contextPruning.mode: "cache-ttl"`).
 
 ```mermaid
 flowchart TD
     RAW[Raw Session History] --> S1
     S1["Stage 1: limitHistoryTurns<br/>Keep the last N user turns<br/>plus their associated assistant/tool messages"] --> S2
-    S2["Stage 2: pruneContextMessages<br/>2-pass tool result trimming<br/>(see Section 6)"] --> S3
-    S3["Stage 3: sanitizeHistory<br/>Repair broken tool_use / tool_result pairing<br/>after truncation"] --> OUT[Cleaned History]
+    S2["Stage 2: sanitizeHistory<br/>Repair broken tool_use / tool_result pairing<br/>after truncation"] --> OUT[Cleaned History]
 ```
 
 ### Stage 1: limitHistoryTurns
 
 Takes the raw session history and a `historyLimit` parameter. Keeps only the last N user turns along with all associated assistant and tool messages that belong to those turns. Earlier messages are discarded.
 
-### Stage 2: pruneContextMessages
-
-Applies the 2-pass context pruning algorithm described in Section 6.
-
-### Stage 3: sanitizeHistory
+### Stage 2: sanitizeHistory
 
 Repairs tool message pairing that may have been broken by truncation or compaction:
 
@@ -279,15 +425,17 @@ Repairs tool message pairing that may have been broken by truncation or compacti
 
 ## 6. Context Pruning
 
-Context pruning reduces oversized tool results using a 2-pass algorithm. It only activates when the estimated token-to-context-window ratio crosses a threshold.
+Context pruning reduces oversized tool results using a 2-pass algorithm. **It is opt-in** — configure `contextPruning.mode: "cache-ttl"` to enable. When disabled (default), zero overhead. Owned by PruneStage in the agent pipeline.
 
 ```mermaid
 flowchart TD
-    START[Estimate token ratio vs context window] --> CHECK{Ratio >= softTrimRatio 0.3?}
+    START[Check mode == cache-ttl?] --> GATE{Mode enabled?}
+    GATE -->|No| SKIP[No pruning - zero overhead]
+    GATE -->|Yes| CHECK{Ratio >= softTrimRatio 0.25?}
     CHECK -->|No| DONE[No pruning needed]
     CHECK -->|Yes| PASS1
 
-    PASS1["Pass 1: Soft Trim<br/>For each eligible tool result > 4000 chars:<br/>Keep first 1500 chars + last 1500 chars<br/>Replace middle with '...'"]
+    PASS1["Pass 1: Soft Trim<br/>For each eligible tool result > 6000 chars:<br/>Keep first 3000 chars + last 3000 chars<br/>Replace middle with '...'"]
     PASS1 --> CHECK2{"Ratio >= hardClearRatio 0.5?"}
     CHECK2 -->|No| DONE
     CHECK2 -->|Yes| PASS2
@@ -296,12 +444,25 @@ flowchart TD
     PASS2 --> DONE
 ```
 
+### Configuration
+
+Enable pruning by setting `contextPruning.mode` in agent defaults:
+
+```json5
+agents: {
+  defaults: {
+    contextPruning: { mode: "cache-ttl" }
+  }
+}
+```
+
 ### Defaults
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| `mode` | `""` (disabled) | `""` or `"off"` = disabled; `"cache-ttl"` = enabled |
 | `keepLastAssistants` | 3 | Number of recent assistant messages protected from pruning |
-| `softTrimRatio` | 0.3 | Token ratio threshold to trigger Pass 1 |
+| `softTrimRatio` | 0.25 | Token ratio threshold to trigger Pass 1 |
 | `hardClearRatio` | 0.5 | Token ratio threshold to trigger Pass 2 |
 | `minPrunableToolChars` | 50,000 | Minimum tool result length eligible for hard clear |
 
@@ -399,52 +560,52 @@ The Agent Router manages Loop instances with a cache layer. It supports lazy res
 
 ```mermaid
 flowchart TD
-    GET["Router.Get(agentID)"] --> CACHE{"Cache hit<br/>and TTL valid?"}
+    GET["Router: get agent"] --> CACHE{"Cache hit<br/>and TTL valid?"}
     CACHE -->|Yes| RETURN[Return cached Loop]
     CACHE -->|No or Expired| RESOLVE{"Resolver configured?"}
     RESOLVE -->|No| ERR["Error: agent not found"]
-    RESOLVE -->|Yes| DB["Resolver.Resolve(agentID)<br/>Load from DB, create Loop"]
+    RESOLVE -->|Yes| DB["Resolver: load from DB, create Loop"]
     DB --> STORE[Store in cache with TTL]
     STORE --> RETURN
 ```
 
 ### Cache Invalidation
 
-`InvalidateAgent(agentID)` removes a specific agent from the cache, forcing the next `Get()` call to re-resolve from the database.
+Invalidating an agent removes it from the cache, forcing the next request to re-resolve from the database.
 
 ### Active Run Tracking
 
-| Method | Behavior |
-|--------|----------|
-| `RegisterRun(runID, sessionKey, agentID, cancel)` | Register a new active run with its cancel function |
-| `AbortRun(runID, sessionKey)` | Cancel a run (verifies sessionKey match before aborting) |
-| `AbortRunsForSession(sessionKey)` | Cancel all active runs belonging to a session |
+| Operation | Behavior |
+|-----------|----------|
+| Register run | Record a new active run with its agent, session, and cancellation handle |
+| Abort run | Cancel a specific run; verifies session key ownership before aborting |
+| Abort session runs | Cancel all active runs belonging to a session |
 
 ---
 
 ## 10. Resolver
 
-The `ManagedResolver` lazy-creates Loop instances from PostgreSQL data when the Router encounters a cache miss.
+The Resolver lazy-creates Loop instances from PostgreSQL data when the Router encounters a cache miss.
 
 ```mermaid
 flowchart TD
-    MISS["Router cache miss"] --> LOAD["Step 1: Load agent from DB<br/>AgentStore.GetByKey(agentKey)"]
-    LOAD --> PROV["Step 2: Resolve provider<br/>ProviderRegistry.Get(provider)<br/>Fallback: first provider in registry"]
-    PROV --> BOOT["Step 3: Load bootstrap files<br/>bootstrap.LoadFromStore(agentID)"]
-    BOOT --> DEFAULTS["Step 4: Apply defaults<br/>contextWindow <= 0 then 200K<br/>maxIterations <= 0 then 20"]
-    DEFAULTS --> CREATE["Step 5: Create Loop<br/>NewLoop(LoopConfig)"]
-    CREATE --> WIRE["Step 6: Wire hooks<br/>EnsureUserFilesFunc, ContextFileLoaderFunc"]
+    MISS["Router cache miss"] --> LOAD["Step 1: Load agent from DB"]
+    LOAD --> PROV["Step 2: Resolve provider<br/>Fallback: first provider in registry"]
+    PROV --> BOOT["Step 3: Load bootstrap files from store"]
+    BOOT --> DEFAULTS["Step 4: Apply defaults<br/>contextWindow: 200K, maxIterations: 20"]
+    DEFAULTS --> CREATE["Step 5: Create Loop with resolved config"]
+    CREATE --> WIRE["Step 6: Wire hooks<br/>(user files, context file loader)"]
     WIRE --> DONE["Return Loop to Router for caching"]
 ```
 
 ### Resolved Properties
 
 - **Provider**: looked up by name from the provider registry. Falls back to the first registered provider if not found.
-- **Bootstrap files**: loaded from the workspace directory via `bootstrap.LoadWorkspaceFiles()`. Standard files: AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, USER.md, BOOTSTRAP.md. Additional files (MEMORY.md, USER_PREDEFINED.md, DELEGATION.md, TEAM.md, AVAILABILITY.md) loaded separately as needed. Per-user files (USER.md) created on first chat via `EnsureUserFilesFunc`.
+- **Bootstrap files**: loaded from the workspace directory. Standard files: AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, USER.md, BOOTSTRAP.md. Additional files (MEMORY.md, USER_PREDEFINED.md, DELEGATION.md, TEAM.md, AVAILABILITY.md) loaded separately as needed. Per-user files (USER.md) are created on first chat.
 - **Agent type**: `open` (per-user context, seeded from template files) or `predefined` (agent-level context plus per-user USER.md overlay).
-- **Per-user seeding**: `EnsureUserFilesFunc` seeds template files on first chat, idempotent (skips files that already exist). Uses PostgreSQL's `xmax` trick in `GetOrCreateUserProfile` to distinguish INSERT from ON CONFLICT UPDATE, triggering seeding only for genuinely new users.
-- **Dynamic context loading**: `ContextFileLoaderFunc` resolves context files based on agent type and request context. Returns a `[]bootstrap.ContextFile` list with truncated content for system prompt injection. For open agents: loads per-user files from workspace. For predefined agents: loads agent-level files plus per-user USER.md.
-- **Custom tools**: `DynamicLoader.LoadForAgent()` clones the global tool registry and adds per-agent custom tools, ensuring each agent gets its own isolated set of dynamic tools.
+- **Per-user seeding**: Template files are seeded on first chat, idempotent — skips files that already exist. A database-level check distinguishes genuine new users from returning ones, triggering seeding only once.
+- **Dynamic context loading**: Context files are resolved based on agent type and request context, with truncated content for system prompt injection. Open agents load per-user workspace files; predefined agents load agent-level files plus per-user USER.md.
+- **Custom tools**: Each agent gets its own isolated clone of the tool registry with any per-agent custom tools appended.
 - **Team context**: auto-resolved for agents that belong to a team. Lead agents get the team workspace as default workspace; non-lead members keep their own workspace with team workspace accessible via absolute path tool context.
 
 ---
@@ -472,11 +633,11 @@ Agents that belong to a team have access to shared team workspaces for collabora
 
 ### Context Variables
 
-During runs with team context:
-- `WithToolTeamWorkspace(ctx, wsDir)` — absolute path to shared team workspace
-- `WithToolWorkspace(ctx, effectiveWorkspace)` — effective default workspace for file operations
-- `WithToolTeamID(ctx, teamID)` — team UUID string for team-scoped tool operations
-- `WithToolTaskID(ctx, taskID)` — team task ID when executing dispatched team tasks
+During runs with team context, the following values are injected so tools can resolve the correct paths and scopes:
+- Shared team workspace path (absolute, for cross-member file access)
+- Effective default workspace (team or agent workspace depending on role)
+- Team UUID (for team-scoped tool operations)
+- Active task ID (for workspace file auto-linking during dispatched tasks)
 
 ---
 
@@ -562,19 +723,11 @@ Enabled via the `GOCLAW_TRACE_VERBOSE=1` environment variable.
 
 ## 14. File Reference
 
-| File | Responsibility |
-|------|---------------|
-| `internal/agent/loop_run.go` | Run() entry point: trace creation, span management, event emission wrapper |
-| `internal/agent/loop.go` | runLoop() core loop: LLM iteration, tool execution, message buffering, event emission |
-| `internal/agent/loop_history.go` | History pipeline: limitHistoryTurns, pruneContextMessages, sanitizeHistory, summary injection |
-| `internal/agent/pruning.go` | Context pruning: 2-pass soft trim and hard clear algorithm |
-| `internal/agent/loop_compact.go` | Mid-loop compaction: in-memory message summarization during iterations |
-| `internal/agent/systemprompt.go` | System prompt assembly (19+ sections), PromptFull and PromptMinimal modes |
-| `internal/agent/systemprompt_sections.go` | Individual section builders (tooling, workspace, sandbox, skills, MCP, etc.) |
-| `internal/agent/resolver.go` | ManagedResolver: lazy Loop creation from PostgreSQL, provider resolution, bootstrap loading |
-| `internal/agent/loop_tracing.go` | Trace and span creation, verbose mode input capture, span finalization |
-| `internal/agent/input_guard.go` | Input Guard: 6 regex patterns, 4 action modes, security logging |
-| `internal/agent/sanitize.go` | 7-step output sanitization pipeline |
-| `internal/agent/memoryflush.go` | Pre-compaction memory flush: embedded agent turn with write_file tool |
-| `internal/agent/toolloop.go` | Tool execution and loop detection (no-progress warnings) |
-| `internal/bootstrap/files.go` | Bootstrap file loading and context file preparation |
+| Module | Path | Purpose |
+|---|---|---|
+| Agent loop & pipeline | `internal/agent/` | V2 runLoop, V3 pipeline adapter, system prompt, resolver, input guard, sanitize, compaction, tracing, orchestration mode, suggestion engine |
+| V3 pipeline stages | `internal/pipeline/` | 8-stage pipeline (context→think→prune→tool→observe→checkpoint→finalize→memory flush), RunState, MessageBuffer |
+| Memory consolidation & vault | `internal/consolidation/`, `internal/vault/` | Episodic/semantic/dreaming workers, vault retriever, L0 auto-injector, wikilinks, FS sync |
+| Infrastructure | `internal/eventbus/`, `internal/tokencount/`, `internal/workspace/`, `internal/bootstrap/` | DomainEventBus, tiktoken counter, WorkspaceContext resolver, bootstrap file loading |
+
+Use `grep` or your editor's symbol search for specific files.

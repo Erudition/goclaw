@@ -9,6 +9,7 @@ import { Pagination } from "@/components/shared/pagination";
 import { Badge } from "@/components/ui/badge";
 import { TableSkeleton } from "@/components/shared/loading-skeleton";
 import { useDeferredLoading } from "@/hooks/use-deferred-loading";
+import { useUiStore } from "@/stores/use-ui-store";
 import { useSessions } from "./hooks/use-sessions";
 import { SessionDetailPage } from "./session-detail-page";
 import { parseSessionKey } from "@/lib/session-key";
@@ -19,9 +20,12 @@ export function SessionsPage() {
   const { t } = useTranslation("sessions");
   const { key: detailKey } = useParams<{ key: string }>();
   const navigate = useNavigate();
+  const globalPageSize = useUiStore((s) => s.pageSize);
+  const setGlobalPageSize = useUiStore((s) => s.setPageSize);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  const [pageSize, setPageSizeRaw] = useState(globalPageSize);
+  const setPageSize = (size: number) => { setPageSizeRaw(size); setPage(1); setGlobalPageSize(size); };
 
   const { sessions, total, loading, preview, deleteSession, resetSession, patchSession } = useSessions({
     limit: pageSize,
@@ -144,7 +148,7 @@ function SessionRow({
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           {session.metadata?.username ? `@${session.metadata.username}` : session.key}
           {session.channel && session.channel !== "ws" && (
-            <Badge variant="secondary" className="text-[10px] px-1 py-0">{session.channel}</Badge>
+            <Badge variant="secondary" className="text-2xs px-1 py-0">{session.channel}</Badge>
           )}
         </div>
       </td>
@@ -202,7 +206,7 @@ function ContextUsageBar({
             style={{ width: `${pct}%` }}
           />
         </div>
-        <div className="mt-0.5 flex items-center gap-1 text-[10px] text-muted-foreground">
+        <div className="mt-0.5 flex items-center gap-1 text-2xs text-muted-foreground">
           <span>{formatTokens(estimatedTokens)} / {formatTokens(contextWindow)}</span>
           {compactionCount > 0 && (
             <span

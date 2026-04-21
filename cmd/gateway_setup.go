@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/audio"
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
@@ -44,6 +45,7 @@ func setupToolRegistry(
 	browserMgr *browser.Manager,
 	webFetchTool *tools.WebFetchTool,
 	ttsTool *tools.TtsTool,
+	audioMgr *audio.Manager,
 	permPE *permissions.PolicyEngine,
 	toolPE *tools.PolicyEngine,
 	dataDir string,
@@ -85,6 +87,7 @@ func setupToolRegistry(
 	// Memory tools — PG-backed; always registered (PG memory is always available)
 	toolsReg.Register(tools.NewMemorySearchTool())
 	toolsReg.Register(tools.NewMemoryGetTool())
+	toolsReg.Register(tools.NewMemoryExpandTool())
 	toolsReg.Register(tools.NewKnowledgeGraphSearchTool())
 	slog.Info("memory + knowledge graph tools registered (PG-backed)")
 
@@ -114,16 +117,7 @@ func setupToolRegistry(
 		toolsReg.Register(browser.NewBrowserTool(browserMgr))
 	}
 
-	// Web tools (web_search + web_fetch)
-	webSearchTool := tools.NewWebSearchTool(tools.WebSearchConfig{
-		BraveEnabled: cfg.Tools.Web.Brave.Enabled,
-		BraveAPIKey:  cfg.Tools.Web.Brave.APIKey,
-		DDGEnabled:   cfg.Tools.Web.DuckDuckGo.Enabled,
-	})
-	if webSearchTool != nil {
-		toolsReg.Register(webSearchTool)
-		slog.Info("web_search tool enabled")
-	}
+	// Web tools (web_fetch; web_search is registered in wireExtraTools after stores are ready)
 	webFetchTool = tools.NewWebFetchTool(tools.WebFetchConfig{
 		Policy:         cfg.Tools.WebFetch.Policy,
 		AllowedDomains: cfg.Tools.WebFetch.AllowedDomains,
@@ -136,15 +130,19 @@ func setupToolRegistry(
 	toolsReg.Register(tools.NewReadImageTool(providerRegistry))
 	toolsReg.Register(tools.NewCreateImageTool(providerRegistry))
 
-	// Audio generation tool (MiniMax music + ElevenLabs sound effects)
-	toolsReg.Register(tools.NewCreateAudioTool(providerRegistry,
-		cfg.Tts.ElevenLabs.APIKey, cfg.Tts.ElevenLabs.BaseURL))
-
-	// TTS (text-to-speech) system — always create TtsTool so config reload can populate it later
+	// Audio system: build Manager first so Music/SFX providers are registered
+	// before the create_audio tool is constructed.
 	ttsMgr := setupTTS(cfg)
 	if ttsMgr == nil {
 		ttsMgr = tts.NewManager(tts.ManagerConfig{})
 	}
+	setupAudioExtras(cfg, ttsMgr)      // Phase 3: registers Music + SFX providers.
+	audio.BridgeLegacySTT(ttsMgr, cfg) // Phase 4: bridge per-channel STTProxyURL → channel-scoped providers.
+	audioMgr = ttsMgr                  // expose to caller for channel STT wiring (Phase 5)
+
+	// Audio generation tool — backed by audio.Manager (Music + SFX).
+	toolsReg.Register(tools.NewCreateAudioTool(ttsMgr))
+
 	ttsTool = tools.NewTtsTool(ttsMgr)
 	toolsReg.Register(ttsTool)
 	if ttsMgr.HasProviders() {
@@ -214,7 +212,12 @@ func setupToolRegistry(
 	if execTool, ok := toolsReg.Get("exec"); ok {
 		if et, ok := execTool.(*tools.ExecTool); ok {
 			et.DenyPaths(dataDir, ".goclaw/")
-			et.AllowPathExemptions(".goclaw/skills-store/")
+			// Allow skills execution: master-tenant skills-store + all tenant-scoped skills-store dirs.
+			et.AllowPathExemptions(
+				".goclaw/skills-store/",
+				filepath.Join(dataDir, "skills-store")+"/",
+				filepath.Join(dataDir, "tenants")+"/",
+			)
 			// Harden: block access to internal workspace files via shell commands.
 			// Prevents `cat ../config.json`, `cat memory.db` etc. from user workspaces.
 			et.DenyPaths(
@@ -295,6 +298,14 @@ func wireTracingAndCron(
 				Payload: map[string]any{"trace_ids": ids},
 			})
 		}
+		// Immediate status broadcast on every successful status write (bypasses 5s flush).
+		traceCollector.SetStatusBroadcaster(func(p tracing.TraceStatusPayload, tid uuid.UUID) {
+			msgBus.Broadcast(bus.Event{
+				Name:     protocol.EventTraceStatusChanged,
+				Payload:  p,
+				TenantID: tid,
+			})
+		})
 		traceCollector.Start()
 		slog.Info("LLM tracing enabled")
 	}
@@ -388,6 +399,18 @@ func setupMemoryEmbeddings(
 						slog.Info("KG embeddings backfill complete", "entities_updated", count)
 					}
 				}()
+			}
+
+			// Wire embedding provider into vault store for semantic document search.
+			if pgStores.Vault != nil {
+				pgStores.Vault.SetEmbeddingProvider(embProvider)
+				slog.Info("vault embeddings enabled", "provider", embProvider.Name())
+			}
+
+			// V3: Wire embedding provider into episodic store for semantic search.
+			if pgStores.Episodic != nil {
+				pgStores.Episodic.SetEmbeddingProvider(embProvider)
+				slog.Info("episodic embeddings enabled", "provider", embProvider.Name())
 			}
 		} else {
 			slog.Warn("memory embeddings disabled (no API key), chunks stored without vectors")

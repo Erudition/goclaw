@@ -2,34 +2,44 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
 // BridgeTool adapts an MCP tool into the tools.Tool interface.
 // It delegates Execute calls to the MCP server via the client.
+// The client pointer is loaded atomically from clientPtr to support
+// safe reconnection without data races.
 type BridgeTool struct {
 	serverName     string
-	toolName       string // original MCP tool name
-	registeredName string // may include prefix: "{prefix}__{toolName}"
+	serverID       uuid.UUID    // MCP server ID (for grant recheck)
+	toolName       string       // original MCP tool name
+	registeredName string       // may include prefix: "{prefix}__{toolName}"
 	description    string
 	inputSchema    map[string]any // JSON Schema for parameters
 	requiredSet    map[string]bool
-	client         *mcpclient.Client
+	clientPtr      *atomic.Pointer[mcpclient.Client] // shared with serverState for atomic swap on reconnect
 	timeoutSec     int
 	connected      *atomic.Bool
+	grantChecker   GrantChecker // for runtime grant recheck (nil = skip check)
 }
 
 // NewBridgeTool creates a BridgeTool from an MCP Tool definition.
 // The tool name is always prefixed with "mcp_" to distinguish MCP tools from native tools.
 // If prefix is empty, it is auto-derived from the server name.
-func NewBridgeTool(serverName string, mcpTool mcpgo.Tool, client *mcpclient.Client, prefix string, timeoutSec int, connected *atomic.Bool) *BridgeTool {
+// clientPtr is a shared atomic pointer from serverState — reconnection swaps it
+// atomically, and all BridgeTools see the new client without explicit notification.
+// serverID and grantChecker are optional — pass uuid.Nil and nil for config-path mode.
+func NewBridgeTool(serverName string, mcpTool mcpgo.Tool, clientPtr *atomic.Pointer[mcpclient.Client], prefix string, timeoutSec int, connected *atomic.Bool, serverID uuid.UUID, grantChecker GrantChecker) *BridgeTool {
 	name := mcpTool.Name
 	effectivePrefix := ensureMCPPrefix(prefix, serverName)
 	registered := effectivePrefix + "__" + name
@@ -47,14 +57,16 @@ func NewBridgeTool(serverName string, mcpTool mcpgo.Tool, client *mcpclient.Clie
 
 	return &BridgeTool{
 		serverName:     serverName,
+		serverID:       serverID,
 		toolName:       name,
 		registeredName: registered,
 		description:    mcpTool.Description,
 		inputSchema:    schema,
 		requiredSet:    reqSet,
-		client:         client,
+		clientPtr:      clientPtr,
 		timeoutSec:     timeoutSec,
 		connected:      connected,
+		grantChecker:   grantChecker,
 	}
 }
 
@@ -94,8 +106,22 @@ func (t *BridgeTool) OriginalName() string { return t.toolName }
 func (t *BridgeTool) IsConnected() bool { return t.connected.Load() }
 
 func (t *BridgeTool) Execute(ctx context.Context, args map[string]any) *tools.Result {
+	// Recheck grant before execution — defense against revoked grants
+	if t.grantChecker != nil {
+		agentID := store.AgentIDFromContext(ctx)
+		userID := store.UserIDFromContext(ctx)
+		if !t.grantChecker.IsAllowed(ctx, agentID, userID, t.serverID, t.toolName) {
+			return tools.ErrorResult(fmt.Sprintf("MCP tool %q: grant revoked", t.registeredName))
+		}
+	}
+
 	if !t.connected.Load() {
 		return tools.ErrorResult(fmt.Sprintf("MCP server %q is disconnected", t.serverName))
+	}
+
+	client := t.clientPtr.Load() // atomic load — safe during concurrent reconnect
+	if client == nil {
+		return tools.ErrorResult(fmt.Sprintf("MCP server %q has no active client", t.serverName))
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, time.Duration(t.timeoutSec)*time.Second)
@@ -110,9 +136,9 @@ func (t *BridgeTool) Execute(ctx context.Context, args map[string]any) *tools.Re
 	req.Params.Name = t.toolName
 	req.Params.Arguments = cleanedArgs
 
-	result, err := t.client.CallTool(callCtx, req)
+	result, err := client.CallTool(callCtx, req)
 	if err != nil {
-		if callCtx.Err() == context.DeadlineExceeded {
+		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
 			return tools.ErrorResult(fmt.Sprintf("MCP tool %q timeout after %ds", t.registeredName, t.timeoutSec))
 		}
 		return tools.ErrorResult(fmt.Sprintf("MCP tool %q error: %v", t.registeredName, err))

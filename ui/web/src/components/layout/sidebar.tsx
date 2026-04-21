@@ -27,6 +27,9 @@ import {
   KeyRound,
   Building2,
   ArrowLeftRight,
+  FileArchive,
+  DatabaseBackup,
+  Webhook,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { SidebarGroup } from "./sidebar-group";
@@ -82,7 +85,7 @@ export function Sidebar({ collapsed, onNavItemClick }: SidebarProps) {
       <nav className="flex-1 space-y-4 overflow-y-auto px-2 py-4">
         <SidebarGroup label={t("groups.core")} collapsed={collapsed}>
           <SidebarItem to={ROUTES.OVERVIEW} icon={LayoutDashboard} label={t("nav.overview")} collapsed={collapsed} />
-          <SidebarItem to="/chat" icon={MessageSquare} label={t("nav.chat")} collapsed={collapsed} />
+          <SidebarItem to={ROUTES.CHAT} icon={MessageSquare} label={t("nav.chat")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.AGENTS} icon={Bot} label={t("nav.agents")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.TEAMS} icon={Users} label={t("nav.agentTeams")} collapsed={collapsed} />
         </SidebarGroup>
@@ -106,10 +109,12 @@ export function Sidebar({ collapsed, onNavItemClick }: SidebarProps) {
             <SidebarItem to={ROUTES.TTS} icon={Volume2} label={t("nav.tts")} collapsed={collapsed} />
           )}
           <SidebarItem to={ROUTES.CRON} icon={Clock} label={t("nav.cron")} collapsed={collapsed} />
+          <SidebarItem to={ROUTES.HOOKS} icon={Webhook} label={t("nav.hooks")} collapsed={collapsed} />
         </SidebarGroup>
 
         <SidebarGroup label={t("groups.data")} collapsed={collapsed}>
           <SidebarItem to={ROUTES.MEMORY} icon={Brain} label={t("nav.memory")} collapsed={collapsed} />
+          <SidebarItem to={ROUTES.VAULT} icon={FileArchive} label={t("nav.vault")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.KNOWLEDGE_GRAPH} icon={Network} label={t("nav.knowledgeGraph")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.STORAGE} icon={HardDrive} label={t("nav.storage")} collapsed={collapsed} />
         </SidebarGroup>
@@ -135,6 +140,9 @@ export function Sidebar({ collapsed, onNavItemClick }: SidebarProps) {
           )}
           <SidebarItem to={ROUTES.APPROVALS} icon={ShieldCheck} label={t("nav.approvals")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.IMPORT_EXPORT} icon={ArrowLeftRight} label={t("nav.importExport")} collapsed={collapsed} />
+          {isOwner && (
+            <SidebarItem to={ROUTES.BACKUP_RESTORE} icon={DatabaseBackup} label={t("nav.backupRestore")} collapsed={collapsed} />
+          )}
         </SidebarGroup>
         )}
       </nav>
