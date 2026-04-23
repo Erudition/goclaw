@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,37 +33,56 @@ func ScanSkillDeps(skillDir string) *SkillManifest {
 func scanScriptsDir(scriptsDir string) *SkillManifest {
 	m := &SkillManifest{ScriptsDir: scriptsDir}
 
+	entries, err := os.ReadDir(scriptsDir)
+	if err != nil {
+		slog.Debug("dep_scanner: scripts dir not found", "dir", scriptsDir, "error", err)
+		return m
+	}
+
 	pyImports := make(map[string]bool)
 	nodeImports := make(map[string]bool)
 	binaries := make(map[string]bool)
-	// Track directory names and .py filenames — these are local modules and must never be reported as missing.
+	// Track subdirectory names — these are local modules and must never be reported as missing.
 	localModules := make(map[string]bool)
 	// The scripts directory itself can be referenced as a module (e.g. "from scripts import utils").
 	localModules[filepath.Base(scriptsDir)] = true
 
-	// Walk the scripts directory once to find all local modules (dirs and .py files)
-	_ = filepath.WalkDir(scriptsDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if path != scriptsDir {
-				localModules[d.Name()] = true
+	for _, e := range entries {
+		if e.IsDir() {
+			localModules[e.Name()] = true
+			// Recurse one level into subdirectories
+			subEntries, err := os.ReadDir(filepath.Join(scriptsDir, e.Name()))
+			if err != nil {
+				continue
 			}
-		} else if strings.HasSuffix(d.Name(), ".py") {
-			localModules[strings.TrimSuffix(d.Name(), ".py")] = true
+			for _, se := range subEntries {
+				if se.IsDir() {
+					// Track nested subdirs as local modules too (e.g. office/helpers, office/validators)
+					// so intra-package imports like "from helpers import ..." don't get falsely reported.
+					localModules[se.Name()] = true
+					// Scan files inside nested subdirs
+					nestedEntries, err := os.ReadDir(filepath.Join(scriptsDir, e.Name(), se.Name()))
+					if err != nil {
+						continue
+					}
+					for _, ne := range nestedEntries {
+						if !ne.IsDir() {
+							scanFile(filepath.Join(scriptsDir, e.Name(), se.Name(), ne.Name()), pyImports, nodeImports, binaries)
+						}
+					}
+					continue
+				}
+				scanFile(filepath.Join(scriptsDir, e.Name(), se.Name()), pyImports, nodeImports, binaries)
+			}
+			continue
 		}
-		return nil
-	})
-
-	// Walk again to scan imports in all files
-	_ = filepath.WalkDir(scriptsDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
+		// Track sibling .py files as local modules so cross-file imports
+		// (e.g. "from extract_form_field_info import ...") are not reported as pip deps.
+		if strings.HasSuffix(e.Name(), ".py") {
+			localModules[strings.TrimSuffix(e.Name(), ".py")] = true
 		}
-		scanFile(path, pyImports, nodeImports, binaries)
-		return nil
-	})
+		scanFile(filepath.Join(scriptsDir, e.Name()), pyImports, nodeImports, binaries)
+	}
 
 	for b := range binaries {
 		m.Requires = append(m.Requires, b)
@@ -84,6 +104,11 @@ func scanScriptsDir(scriptsDir string) *SkillManifest {
 	}
 	if len(nodeImports) > 0 && !binaries["node"] {
 		m.Requires = append(m.Requires, "node")
+	}
+
+	if !m.IsEmpty() {
+		slog.Debug("dep_scanner: scanned", "dir", scriptsDir,
+			"bins", len(m.Requires), "py", len(m.RequiresPython), "node", len(m.RequiresNode))
 	}
 
 	return m

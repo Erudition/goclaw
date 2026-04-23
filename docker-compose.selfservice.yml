@@ -7,8 +7,7 @@
 
 services:
   goclaw-ui:
-    image: goclaw-ui-local:latest
-    pull_policy: build
+    image: ghcr.io/nextlevelbuilder/goclaw-web:latest
     build:
       context: ./ui/web
       dockerfile: Dockerfile
@@ -16,7 +15,7 @@ services:
       - "${GOCLAW_UI_PORT:-3000}:80"
     networks:
       - default
-      - shared
+      - goclaw-net
     depends_on:
       - goclaw
     restart: unless-stopped

@@ -186,6 +186,8 @@ func (c *Config) applyEnvOverrides() {
 	// Database
 	envStr("GOCLAW_POSTGRES_DSN", &c.Database.PostgresDSN)
 	envStr("GOCLAW_REDIS_DSN", &c.Database.RedisDSN)
+	envStr("GOCLAW_STORAGE_BACKEND", &c.Database.StorageBackend)
+	envStr("GOCLAW_SQLITE_PATH", &c.Database.SQLitePath)
 
 	// Deprecation warning for GOCLAW_MODE (removed — PostgreSQL is always active)
 	if v := os.Getenv("GOCLAW_MODE"); v != "" {
@@ -203,9 +205,15 @@ func (c *Config) applyEnvOverrides() {
 		c.Telemetry.Insecure = v == "true" || v == "1"
 	}
 
-	// Owner IDs from env (comma-separated)
+	// Owner IDs from env (comma-separated, whitespace-trimmed)
 	if v := os.Getenv("GOCLAW_OWNER_IDS"); v != "" {
-		c.Gateway.OwnerIDs = strings.Split(v, ",")
+		var ids []string
+		for id := range strings.SplitSeq(v, ",") {
+			if trimmed := strings.TrimSpace(id); trimmed != "" {
+				ids = append(ids, trimmed)
+			}
+		}
+		c.Gateway.OwnerIDs = ids
 	}
 
 	// Tailscale (tsnet)
@@ -256,10 +264,6 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("GOCLAW_SANDBOX_NETWORK"); v != "" {
 		ensureSandbox()
 		c.Agents.Defaults.Sandbox.NetworkEnabled = v == "true" || v == "1"
-	}
-	if v := os.Getenv("GOCLAW_SANDBOX_WORKSPACE_PATH"); v != "" {
-		ensureSandbox()
-		c.Agents.Defaults.Sandbox.Workdir = v
 	}
 
 	// Browser (for Docker-compose browser sidecar overlay)

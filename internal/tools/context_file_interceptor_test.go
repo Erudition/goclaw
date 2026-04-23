@@ -45,6 +45,15 @@ func (s *stubAgentStore) DeleteUserContextFile(_ context.Context, _ uuid.UUID, _
 func (s *stubAgentStore) Create(_ context.Context, _ *store.AgentData) error              { return nil }
 func (s *stubAgentStore) GetByKey(_ context.Context, _ string) (*store.AgentData, error)  { return nil, nil }
 func (s *stubAgentStore) GetByID(_ context.Context, _ uuid.UUID) (*store.AgentData, error) { return nil, nil }
+func (s *stubAgentStore) GetByIDUnscoped(_ context.Context, _ uuid.UUID) (*store.AgentData, error) {
+	return nil, nil
+}
+func (s *stubAgentStore) GetByKeys(_ context.Context, _ []string) ([]store.AgentData, error) {
+	return nil, nil
+}
+func (s *stubAgentStore) GetByIDs(_ context.Context, _ []uuid.UUID) ([]store.AgentData, error) {
+	return nil, nil
+}
 func (s *stubAgentStore) GetDefault(_ context.Context) (*store.AgentData, error)            { return nil, nil }
 func (s *stubAgentStore) Update(_ context.Context, _ uuid.UUID, _ map[string]any) error   { return nil }
 func (s *stubAgentStore) Delete(_ context.Context, _ uuid.UUID) error                     { return nil }
@@ -77,6 +86,9 @@ func (s *stubAgentStore) UpdateUserProfileMetadata(_ context.Context, _ uuid.UUI
 }
 func (s *stubAgentStore) EnsureUserProfile(_ context.Context, _ uuid.UUID, _ string) error {
 	return nil
+}
+func (s *stubAgentStore) PropagateContextFile(_ context.Context, _ uuid.UUID, _ string) (int, error) {
+	return 0, nil
 }
 
 // ---- Tests ----

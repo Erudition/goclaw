@@ -128,9 +128,6 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 	allPatterns = append(allPatterns, groupPatterns...)
 	allPatterns = append(allPatterns, t.pathDenyPatterns...)
 
-	// Sandbox routing (sandboxKey from ctx — thread-safe)
-	sandboxKey := ToolSandboxKeyFromCtx(ctx)
-
 	// Check for dangerous commands (applies to both host and sandbox).
 	for _, pattern := range allPatterns {
 		if pattern.MatchString(command) {
@@ -142,15 +139,6 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 					break
 				}
 			}
-
-			// Sandbox network relaxation: allow DNS tools if networking is enabled in sandbox.
-			// These are still blocked on host.
-			if !exempt && sandboxKey != "" && ToolSandboxNetworkFromCtx(ctx) {
-				if pattern.String() == `\b(nslookup|dig|host)\b` {
-					exempt = true
-				}
-			}
-
 			if exempt {
 				continue
 			}
@@ -190,6 +178,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 				cwd = wd
 			}
 		}
+		sandboxKey := ToolSandboxKeyFromCtx(ctx)
 		return t.executeCredentialed(ctx, cred, binary, cmdArgs, cwd, sandboxKey)
 	}
 
@@ -209,14 +198,23 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 		}
 	}
 
-	// Use per-user workspace from context if available, fallback to struct field
+	// Use per-user workspace from context if available, fallback to struct field.
+	// The context workspace is tenant-scoped; t.workspace is the global (master) workspace.
 	cwd := ToolWorkspaceFromCtx(ctx)
 	if cwd == "" {
 		cwd = t.workspace
 	}
 	if wd, _ := args["working_dir"].(string); wd != "" {
 		if effectiveRestrict(ctx, t.restrict) {
-			resolved, err := resolvePath(wd, t.workspace, true)
+			// Validate working_dir against the tenant-scoped workspace (not the
+			// global workspace) so non-master tenants can't escape their scope.
+			// Also allow team workspace as a valid target (same as filesystem tools).
+			wsBase := ToolWorkspaceFromCtx(ctx)
+			if wsBase == "" {
+				wsBase = t.workspace
+			}
+			allowed := allowedWithTeamWorkspace(ctx, nil)
+			resolved, err := resolvePathWithAllowed(wd, wsBase, true, allowed)
 			if err != nil {
 				return ErrorResult(err.Error())
 			}
@@ -227,6 +225,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 	}
 
 	// Sandbox routing (sandboxKey from ctx — thread-safe)
+	sandboxKey := ToolSandboxKeyFromCtx(ctx)
 	if t.sandboxMgr != nil && sandboxKey != "" {
 		return t.executeInSandbox(ctx, command, cwd, sandboxKey)
 	}
@@ -291,10 +290,6 @@ func (t *ExecTool) executeOnHost(ctx context.Context, command, cwd string) *Resu
 
 // executeInSandbox routes a command through a Docker sandbox container.
 func (t *ExecTool) executeInSandbox(ctx context.Context, command, cwd, sandboxKey string) *Result {
-	// Propagate per-agent network setting to the sandbox manager.
-	if netEnabled := ToolSandboxNetworkFromCtx(ctx); netEnabled {
-		ctx = sandbox.WithNetworkOverride(ctx, true)
-	}
 	sb, err := t.sandboxMgr.Get(ctx, sandboxKey, t.workspace, SandboxConfigFromCtx(ctx))
 	if err != nil {
 		if errors.Is(err, sandbox.ErrSandboxDisabled) {

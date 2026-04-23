@@ -217,21 +217,3 @@ type Manager interface {
 
 // ErrSandboxDisabled is returned when sandbox mode is "off".
 var ErrSandboxDisabled = fmt.Errorf("sandbox is disabled")
-
-// ctxKeyNetworkOverride is a context key for per-request network override.
-type ctxKeyNetworkOverride struct{}
-
-// WithNetworkOverride returns a context that overrides the sandbox
-// NetworkEnabled setting for container creation. When set to true on a
-// context passed to Manager.Get(), the resulting container will have
-// network access regardless of the manager's default config.
-func WithNetworkOverride(ctx context.Context, enabled bool) context.Context {
-	return context.WithValue(ctx, ctxKeyNetworkOverride{}, enabled)
-}
-
-// NetworkOverrideFromCtx reads the per-request network override.
-// Returns (value, true) if set, or (false, false) if unset.
-func NetworkOverrideFromCtx(ctx context.Context) (bool, bool) {
-	v, ok := ctx.Value(ctxKeyNetworkOverride{}).(bool)
-	return v, ok
-}

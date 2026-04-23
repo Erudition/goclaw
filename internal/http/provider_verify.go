@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -82,7 +84,9 @@ func (h *ProvidersHandler) handleVerifyProvider(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	provider, err := h.providerReg.Get(p.Name)
+	// Use provider's own TenantID (not request context) so cross-tenant admins
+	// can verify providers belonging to other tenants.
+	provider, err := h.providerReg.GetForTenant(p.TenantID, p.Name)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"valid": false, "error": "provider not registered: " + p.Name})
 		return
@@ -95,7 +99,7 @@ func (h *ProvidersHandler) handleVerifyProvider(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
 	_, err = provider.Chat(ctx, providers.ChatRequest{
@@ -135,11 +139,14 @@ func (h *ProvidersHandler) handleClaudeCLIAuthStatus(w http.ResponseWriter, r *h
 		}
 	}
 
+	inDocker := config.InDocker()
+
 	status, err := providers.CheckClaudeAuthStatus(ctx, cliPath)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"logged_in": false,
 			"error":     err.Error(),
+			"in_docker": inDocker,
 		})
 		return
 	}
@@ -148,6 +155,7 @@ func (h *ProvidersHandler) handleClaudeCLIAuthStatus(w http.ResponseWriter, r *h
 		"logged_in":         status.LoggedIn,
 		"email":             status.Email,
 		"subscription_type": status.SubscriptionType,
+		"in_docker":         inDocker,
 	})
 }
 
@@ -171,6 +179,14 @@ func isNonChatModel(model string) bool {
 // friendlyVerifyError extracts a human-readable message from provider errors.
 // Raw errors often contain JSON blobs like: `HTTP 400: minimax: {"type":"error","error":{"type":"bad_request_error","message":"unknown model ..."}}`
 func friendlyVerifyError(err error) string {
+	// Timeout / context cancellation → user-friendly message
+	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "context deadline exceeded") {
+		return "Verification timed out — the provider took too long to respond. Please try again."
+	}
+	if errors.Is(err, context.Canceled) {
+		return "Verification was cancelled. Please try again."
+	}
+
 	msg := err.Error()
 
 	// Try to extract "message" field from embedded JSON

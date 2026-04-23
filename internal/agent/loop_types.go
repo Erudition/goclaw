@@ -24,8 +24,28 @@ import (
 // Bootstrap typically completes in 2-3 conversation turns.
 const bootstrapAutoCleanupTurns = 3
 
-// EnsureUserFilesFunc seeds per-user context files on first chat.
-// Returns the effective workspace path (from user_agent_profiles) for caching.
+// userSetup tracks per-user initialization state within a Loop instance.
+// Consolidates workspace resolution and context file seeding into one struct
+// to prevent desync between the two concerns.
+type userSetup struct {
+	workspace string // effective workspace from user_agent_profiles (expanded, absolute)
+	seeded    bool   // whether SeedUserFiles has been called this instance
+}
+
+// EnsureUserProfileFunc creates/resolves a user's profile and workspace.
+// Returns the effective workspace path from user_agent_profiles.
+// Does NOT seed context files — that's SeedUserFilesFunc's responsibility.
+type EnsureUserProfileFunc func(ctx context.Context, agentID uuid.UUID, userID, workspace, channel string) (effectiveWorkspace string, isNew bool, err error)
+
+// SeedUserFilesFunc seeds per-user context files (BOOTSTRAP.md, USER.md, etc.).
+// Called once per user per Loop instance, independent of workspace.
+// isNew indicates whether the profile was just created (seed all) or already existed
+// (only seed if user has zero files — avoids re-seeding after BOOTSTRAP.md cleanup).
+type SeedUserFilesFunc func(ctx context.Context, agentID uuid.UUID, userID, agentType string, isNew bool) error
+
+// EnsureUserFilesFunc is the legacy combined callback (profile + seed + workspace).
+// Deprecated: use EnsureUserProfileFunc + SeedUserFilesFunc separately.
+// Kept for backward compatibility with existing callers during migration.
 type EnsureUserFilesFunc func(ctx context.Context, agentID uuid.UUID, userID, agentType, workspace, channel string) (effectiveWorkspace string, err error)
 
 // ContextFileLoaderFunc loads context files dynamically per-request.
@@ -40,6 +60,7 @@ type BootstrapCleanupFunc func(ctx context.Context, agentID uuid.UUID, userID st
 type Loop struct {
 	id            string
 	agentUUID     uuid.UUID // set for context propagation
+	tenantID      uuid.UUID // agent's owning tenant
 	agentType     string    // "open" or "predefined"
 	provider      providers.Provider
 	model         string
@@ -74,11 +95,13 @@ type Loop struct {
 	hasMemory      bool
 	contextFiles   []bootstrap.ContextFile
 
-	// Per-user file seeding + dynamic context loading
-	ensureUserFiles   EnsureUserFilesFunc
+	// Per-user profile + file seeding + dynamic context loading
+	ensureUserProfile EnsureUserProfileFunc // create/resolve user profile + workspace
+	seedUserFiles     SeedUserFilesFunc     // seed context files (BOOTSTRAP.md, USER.md)
+	ensureUserFiles   EnsureUserFilesFunc   // legacy combined callback (fallback)
 	contextFileLoader ContextFileLoaderFunc
 	bootstrapCleanup  BootstrapCleanupFunc
-	userWorkspaces    sync.Map // userID → string (expanded workspace path from user_agent_profiles)
+	userSetups sync.Map // userID → *userSetup (workspace + seeding state, per Loop instance)
 
 	// Compaction config (memory flush settings)
 	compactionCfg *config.CompactionConfig
@@ -88,7 +111,6 @@ type Loop struct {
 
 	// Sandbox info
 	sandboxEnabled         bool
-	sandboxNetworkEnabled bool
 	sandboxContainerDir    string
 	sandboxWorkspaceAccess string
 
@@ -108,6 +130,9 @@ type Loop struct {
 
 	// Global builtin tool settings (from builtin_tools table)
 	builtinToolSettings tools.BuiltinToolSettings
+
+	// Per-tenant disabled tools (tool name → true means excluded from LLM)
+	disabledTools map[string]bool
 
 	// Thinking level for extended thinking support
 	thinkingLevel string
@@ -157,10 +182,14 @@ type AgentEvent struct {
 	TeamTaskID    string `json:"teamTaskId,omitempty"`
 	ParentAgentID string `json:"parentAgentId,omitempty"`
 
-	// Routing context (helps WS clients filter by user/channel)
-	UserID  string `json:"userId,omitempty"`
-	Channel string `json:"channel,omitempty"`
-	ChatID  string `json:"chatId,omitempty"`
+	// Routing context (helps WS clients filter by user/channel/session)
+	UserID     string `json:"userId,omitempty"`
+	Channel    string `json:"channel,omitempty"`
+	ChatID     string `json:"chatId,omitempty"`
+	SessionKey string `json:"sessionKey,omitempty"`
+
+	// TenantID scopes this event to a specific tenant for filtering (not serialized).
+	TenantID uuid.UUID `json:"-"`
 }
 
 // LoopConfig configures a new Loop.
@@ -204,19 +233,21 @@ type LoopConfig struct {
 
 	// Sandbox info (injected into system prompt)
 	SandboxEnabled         bool
-	SandboxNetworkEnabled bool
 	SandboxContainerDir    string // e.g. "/workspace"
 	SandboxWorkspaceAccess string // "none", "ro", "rw"
 
 	// Shell deny group overrides (nil = all defaults)
 	ShellDenyGroups map[string]bool
 
-	// Agent UUID for context propagation to tools
+	// Agent UUID + tenant for context propagation to tools
 	AgentUUID uuid.UUID
-	AgentType string // "open" or "predefined"
+	TenantID  uuid.UUID // agent's owning tenant — injected into execution context
+	AgentType string    // "open" or "predefined"
 
-	// Per-user file seeding + dynamic context loading
-	EnsureUserFiles   EnsureUserFilesFunc
+	// Per-user profile + file seeding + dynamic context loading
+	EnsureUserProfile EnsureUserProfileFunc // preferred: separate profile + workspace
+	SeedUserFiles     SeedUserFilesFunc     // preferred: separate context file seeding
+	EnsureUserFiles   EnsureUserFilesFunc   // legacy: combined (used when above are nil)
 	ContextFileLoader ContextFileLoaderFunc
 	BootstrapCleanup  BootstrapCleanupFunc
 
@@ -230,6 +261,9 @@ type LoopConfig struct {
 
 	// Global builtin tool settings (from builtin_tools table)
 	BuiltinToolSettings tools.BuiltinToolSettings
+
+	// Per-tenant disabled tools (tool name → true means excluded)
+	DisabledTools map[string]bool
 
 	// Thinking level: "off", "low", "medium", "high" (from agent other_config)
 	ThinkingLevel string
@@ -300,6 +334,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 	return &Loop{
 		id:                     cfg.ID,
 		agentUUID:              cfg.AgentUUID,
+		tenantID:               cfg.TenantID,
 		agentType:              cfg.AgentType,
 		provider:               cfg.Provider,
 		model:                  cfg.Model,
@@ -325,13 +360,14 @@ func NewLoop(cfg LoopConfig) *Loop {
 		skillAllowList:         cfg.SkillAllowList,
 		hasMemory:              cfg.HasMemory,
 		contextFiles:           cfg.ContextFiles,
+		ensureUserProfile:      cfg.EnsureUserProfile,
+		seedUserFiles:          cfg.SeedUserFiles,
 		ensureUserFiles:        cfg.EnsureUserFiles,
 		contextFileLoader:      cfg.ContextFileLoader,
 		bootstrapCleanup:       cfg.BootstrapCleanup,
 		compactionCfg:          cfg.CompactionCfg,
 		contextPruningCfg:      cfg.ContextPruningCfg,
 		sandboxEnabled:         cfg.SandboxEnabled,
-		sandboxNetworkEnabled:  cfg.SandboxNetworkEnabled,
 		sandboxContainerDir:    cfg.SandboxContainerDir,
 		sandboxWorkspaceAccess: cfg.SandboxWorkspaceAccess,
 		shellDenyGroups:        cfg.ShellDenyGroups,
@@ -340,6 +376,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		injectionAction:        action,
 		maxMessageChars:        cfg.MaxMessageChars,
 		builtinToolSettings:    cfg.BuiltinToolSettings,
+		disabledTools:          cfg.DisabledTools,
 		thinkingLevel:          cfg.ThinkingLevel,
 		selfEvolve:             cfg.SelfEvolve,
 		skillEvolve:            cfg.SkillEvolve,
@@ -425,4 +462,45 @@ type MediaResult struct {
 	ContentType string `json:"content_type,omitempty"` // MIME type
 	Size        int64  `json:"size,omitempty"`          // file size in bytes
 	AsVoice     bool   `json:"as_voice,omitempty"`     // send as voice message (Telegram OGG)
+}
+
+// runState encapsulates all mutable state for a single runLoop execution.
+// Grouping these fields enables extracting loop sub-operations into methods
+// on *runState without passing 20+ individual variables.
+type runState struct {
+	// Loop control
+	loopDetector toolLoopState
+	totalUsage   providers.Usage
+	iteration    int
+	totalToolCalls int
+
+	// Output accumulators
+	finalContent   string
+	finalThinking  string
+	asyncToolCalls []string    // async spawn tool names for fallback
+	mediaResults   []MediaResult
+	deliverables   []string   // tool output content for team task results
+	pendingMsgs    []providers.Message
+
+	// Event state
+	blockReplies   int
+	lastBlockReply string
+
+	// Crash safety
+	checkpointFlushedMsgs int
+
+	// Mid-loop compaction
+	midLoopCompacted bool
+
+	// Bootstrap detection
+	bootstrapWriteDetected bool
+
+	// Team task orphan detection
+	teamTaskCreates int
+	teamTaskSpawns  int
+
+	// Skill evolution nudge state
+	skillNudge70Sent    bool
+	skillNudge90Sent    bool
+	skillPostscriptSent bool
 }

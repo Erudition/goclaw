@@ -1,28 +1,16 @@
 # Sandbox overlay — enables Docker-based sandbox for agent code execution.
 #
 # Prerequisites:
-#   1. Ensure Docker socket is accessible
+#   1. Build the sandbox image:  docker build -t goclaw-sandbox:bookworm-slim -f Dockerfile.sandbox .
+#   2. Ensure Docker socket is accessible
 #
 # Usage:
-#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.sandbox.yml up --build
-#
-# The sandbox image is built automatically via the sandbox-image service below.
-# Using --build ensures the image is rebuilt when Dockerfile.sandbox changes
-# (Docker layer caching makes this near-instant when nothing has changed).
+#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.sandbox.yml up
 #
 # SECURITY NOTE: Mounting Docker socket gives the container control over host Docker.
 # Only use in trusted environments where agent code execution isolation is required.
 
 services:
-  sandbox-image:
-    image: goclaw-sandbox:bookworm-slim
-    pull_policy: build
-    build:
-      context: .
-      dockerfile: Dockerfile.sandbox
-    deploy:
-      replicas: 0
-
   goclaw:
     build:
       args:

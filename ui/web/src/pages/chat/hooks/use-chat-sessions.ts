@@ -7,7 +7,6 @@ import { useAuthStore } from "@/stores/use-auth-store";
 import { toast } from "@/stores/use-toast-store";
 import i18next from "i18next";
 import { userFriendlyError } from "@/lib/error-utils";
-
 import { uniqueId } from "@/lib/utils";
 
 /**

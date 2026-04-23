@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
@@ -70,7 +71,7 @@ func New(cfg config.DiscordConfig, msgBus *bus.MessageBus, pairingSvc store.Pair
 		config:          cfg,
 		requireMention:  requireMention,
 		pairingService:  pairingSvc,
-		groupHistory:    channels.MakeHistory(channels.TypeDiscord, pendingStore),
+		groupHistory:    channels.MakeHistory(channels.TypeDiscord, pendingStore, base.TenantID()),
 		historyLimit:    historyLimit,
 		agentStore:      agentStore,
 		configPermStore: configPermStore,
@@ -109,6 +110,9 @@ func (c *Channel) BlockReplyEnabled() *bool { return c.config.BlockReply }
 func (c *Channel) SetPendingCompaction(cfg *channels.CompactionConfig) {
 	c.groupHistory.SetCompactionConfig(cfg)
 }
+
+// SetPendingHistoryTenantID propagates tenant_id to the pending history for DB operations.
+func (c *Channel) SetPendingHistoryTenantID(id uuid.UUID) { c.groupHistory.SetTenantID(id) }
 
 // Stop closes the Discord gateway connection.
 func (c *Channel) Stop(_ context.Context) error {
