@@ -9,8 +9,6 @@ import i18next from "i18next";
 import { userFriendlyError } from "@/lib/error-utils";
 import { uniqueId } from "@/lib/utils";
 
-import { uniqueId } from "@/lib/utils";
-
 /**
  * Manages the session list for the chat sidebar.
  * Loads sessions for the selected agent, supports creating new sessions.
