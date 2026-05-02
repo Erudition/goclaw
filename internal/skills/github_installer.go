@@ -58,7 +58,7 @@ func ParseGitHubSpec(s string) (*GitHubSpec, error) {
 type GitHubPackagesConfig struct {
 	Token          string   // optional GitHub personal access token
 	BinDir         string   // where to install binaries (default /app/data/.runtime/bin)
-	ManifestPath   string   // manifest file path (default {BinDir}/../github-packages.json)
+	ManifestPath   string   // manifest file path (default {BinDir}/github-packages.json)
 	AllowedOrgs    []string // lowercase list; empty = all allowed
 	MaxAssetSizeMB int      // default 200
 }
@@ -69,7 +69,7 @@ func (c *GitHubPackagesConfig) Defaults() {
 		c.BinDir = "/app/data/.runtime/bin"
 	}
 	if c.ManifestPath == "" {
-		c.ManifestPath = filepath.Join(filepath.Dir(c.BinDir), "github-packages.json")
+		c.ManifestPath = filepath.Join(c.BinDir, "github-packages.json")
 	}
 	if c.MaxAssetSizeMB <= 0 {
 		c.MaxAssetSizeMB = 200
