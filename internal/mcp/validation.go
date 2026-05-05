@@ -5,13 +5,36 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
+
+	"github.com/nextlevelbuilder/goclaw/internal/security"
+)
+
+	"fmt"
+	"os"
+	"regexp"
+	"strings"
+	"sync"
+
+	"github.com/nextlevelbuilder/goclaw/internal/security"
+)
+
+import (
+	"sync"
+
+	"fmt"
+	"os"
+	"regexp"
+	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/security"
 )
 
 // Allowed commands for stdio transport (basename only).
 // This is a restrictive allowlist — only well-known runtimes are permitted.
+var allowedCommandsMu sync.RWMutex
 var allowedCommands = map[string]bool{
+
 	"node": true, "npx": true, "npm": true,
 	"python": true, "python3": true, "python2": true,
 	"ruby": true, "go": true, "cargo": true,
@@ -42,6 +65,17 @@ var allowedEnvVars = map[string]bool{
 	"NODE_ENV": true, "ENVIRONMENT": true,
 	"LOG_LEVEL": true, "DEBUG": true,
 }
+
+// RegisterAllowedCommands adds extra commands to the authorized allowlist for stdio transport.
+// This is typically called during gateway startup from the config file.
+func RegisterAllowedCommands(cmds []string) {
+	allowedCommandsMu.Lock()
+	defer allowedCommandsMu.Unlock()
+	for _, cmd := range cmds {
+		allowedCommands[cmd] = true
+	}
+}
+
 
 // ValidateCommand checks stdio command for injection vulnerabilities.
 // Returns nil if the command is safe, or an error describing the issue.
@@ -79,16 +113,24 @@ func ValidateCommand(cmd string) error {
 
 	// Allow absolute paths to known commands
 	if strings.HasPrefix(cmd, "/") {
-		if !allowedCommands[basename] {
+		allowedCommandsMu.RLock()
+		allowed := allowedCommands[basename]
+		allowedCommandsMu.RUnlock()
+		if !allowed {
 			return fmt.Errorf("command %q not in allowlist", basename)
 		}
 		return nil
 	}
 
+
 	// Bare command must be in allowlist
-	if !allowedCommands[cmd] {
+	allowedCommandsMu.RLock()
+	allowed := allowedCommands[cmd]
+	allowedCommandsMu.RUnlock()
+	if !allowed {
 		return fmt.Errorf("command %q not in allowlist (allowed: node, npx, python, python3, ruby, go, java, uvx, uv, pipx, deno, bun)", cmd)
 	}
+
 	return nil
 }
 

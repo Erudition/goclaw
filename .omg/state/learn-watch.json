@@ -1,0 +1,12 @@
+{
+  "last_session_id": "d049d26f-cd2b-4496-a068-d8e682ce648b",
+  "last_event_key": "d049d26f-cd2b-4496-a068-d8e682ce648b:transcript:58e2339d04836bdfa07437b6689d3cdfb88332431a3f7cb0426604402f2396af",
+  "last_prompted_session_id": "",
+  "last_reason": "short-session",
+  "last_prompted_at": "",
+  "last_user_message_count": 0,
+  "last_actionable_message_count": 0,
+  "deep_interview_lock_active": false,
+  "deep_interview_lock_source": "/home/adroit/Projects/goclaw/.omg/state/deep-interview.json",
+  "updated_at": "2026-05-05T07:52:14.903Z"
+}

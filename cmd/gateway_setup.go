@@ -162,6 +162,32 @@ func setupToolRegistry(
 	}
 
 	// MCP servers (config-based: shared across all agents)
+	if len(cfg.Tools.McpServers) > 0 || len(cfg.Tools.McpAllowedCommands) > 0 {
+		if len(cfg.Tools.McpAllowedCommands) > 0 {
+			mcpbridge.RegisterAllowedCommands(cfg.Tools.McpAllowedCommands)
+		}
+		if len(cfg.Tools.McpServers) > 0 {
+			mcpMgr = mcpbridge.NewManager(toolsReg, mcpbridge.WithConfigs(cfg.Tools.McpServers))
+			if err := mcpMgr.Start(context.Background()); err != nil {
+				slog.Warn("mcp.startup_errors", "error", err)
+			}
+			slog.Info("MCP servers initialized", "configured", len(cfg.Tools.McpServers), "tools", len(mcpMgr.ToolNames()))
+		}
+	}
+
+	if len(cfg.Tools.McpServers) > 0 || len(cfg.Tools.McpAllowedCommands) > 0 {
+		if len(cfg.Tools.McpAllowedCommands) > 0 {
+			mcpbridge.RegisterAllowedCommands(cfg.Tools.McpAllowedCommands)
+		}
+		if len(cfg.Tools.McpServers) > 0 {
+			mcpMgr = mcpbridge.NewManager(toolsReg, mcpbridge.WithConfigs(cfg.Tools.McpServers))
+			if err := mcpMgr.Start(context.Background()); err != nil {
+				slog.Warn("mcp.startup_errors", "error", err)
+			}
+			slog.Info("MCP servers initialized", "configured", len(cfg.Tools.McpServers), "tools", len(mcpMgr.ToolNames()))
+		}
+	}
+
 	if len(cfg.Tools.McpServers) > 0 {
 		mcpMgr = mcpbridge.NewManager(toolsReg, mcpbridge.WithConfigs(cfg.Tools.McpServers))
 		if err := mcpMgr.Start(context.Background()); err != nil {

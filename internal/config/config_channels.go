@@ -376,6 +376,8 @@ type ToolsConfig struct {
 	RateLimitPerHour int                         `json:"rate_limit_per_hour,omitempty"` // max tool executions per hour per session (0 = disabled)
 	ScrubCredentials *bool                       `json:"scrub_credentials,omitempty"`   // auto-redact API keys/tokens in tool output (default true)
 	McpServers       map[string]*MCPServerConfig `json:"mcp_servers,omitempty"`         // external MCP server connections
+	McpAllowedCommands []string                  `json:"mcp_allowed_commands,omitempty"` // extra commands authorized for MCP stdio transport
+
 }
 
 // MCPServerConfig configures a single external MCP server connection.
