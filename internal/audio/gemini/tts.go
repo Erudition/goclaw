@@ -169,6 +169,8 @@ func (p *Provider) requestAudio(ctx context.Context, model string, bodyBytes []b
 	case http.StatusUnauthorized:
 		return nil, fmt.Errorf("gemini: auth error (401) — check api key")
 	case http.StatusTooManyRequests:
+		return nil, fmt.Errorf("gemini: rate limit exceeded (429): %s", string(respBytes))
+
 		return nil, fmt.Errorf("gemini: rate limit exceeded (429)")
 	}
 	if status != http.StatusOK {

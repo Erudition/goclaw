@@ -8,6 +8,13 @@ var geminiModels = []string{
 	"gemini-3.1-flash-tts-preview",
 	"gemini-2.5-flash-preview-tts",
 	"gemini-2.5-pro-preview-tts",
+	"gemini-2.0-flash-tts-preview",
+	"gemini-2.0-flash",
+}
+
+	"gemini-3.1-flash-tts-preview",
+	"gemini-2.5-flash-preview-tts",
+	"gemini-2.5-pro-preview-tts",
 }
 
 // defaultModel is the model used when none is specified.
